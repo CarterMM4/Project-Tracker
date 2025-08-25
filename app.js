@@ -1,5 +1,5 @@
-// Southwood Project Tracker — Priority AI + Risk Badges + Contact Tracking
-// No build tools: React/ReactDOM + Babel + Tailwind via CDN (see index.html)
+// Southwood Project Tracker — Risk Tints + Click Sort + Inline Edit + AI Chips + Aging
+// Runs with React/ReactDOM + Babel + Tailwind via CDN (see index.html)
 
 // ------------------------------
 // Constants & helpers
@@ -44,12 +44,6 @@ function addDaysISO(base, days) {
   d.setDate(d.getDate() + days);
   return d.toISOString().slice(0,10);
 }
-function addDaysDate(base, days) {
-  const d = new Date(base);
-  d.setDate(d.getDate() + days);
-  d.setHours(0,0,0,0);
-  return d;
-}
 function includesWord(haystack, needle) {
   const s = ` ${String(haystack).toLowerCase()} `;
   const n = ` ${String(needle).toLowerCase()} `;
@@ -93,12 +87,17 @@ function relLabel(dateISO) {
   return `in ${d}d`;
 }
 
+// Risk thresholds (for aging + stalled)
+const STALL_THRESHOLDS = {
+  Design: 14,
+  Estimating: 10,
+  Permitting: 21,
+  Surveying: 10,
+  Manufacturing: 20,
+  Installing: 7,
+};
+
 // Dates summary
-function getOverallDue(milestones) {
-  const dates = PHASES.map((p) => milestones[p]).filter(Boolean);
-  if (!dates.length) return null;
-  return dates.sort((a,b) => new Date(b) - new Date(a))[0];
-}
 function getNextUpcoming(project) {
   const t0 = todayStart().getTime();
   const future = [];
@@ -124,40 +123,16 @@ function hasOverdue(project) {
   return overduePhases(project).length > 0;
 }
 
-// Risk tier
+// Risk tier (for tinting rows)
 function riskTier(project) {
   const overdue = overduePhases(project);
-  if (overdue.length) return { tier: "Overdue", class: "bg-rose-600/15 text-rose-300 border border-rose-700" };
+  if (overdue.length) return { tier: "Overdue", row: "bg-rose-950/40", badge: "bg-rose-600/15 text-rose-300 border border-rose-700" };
   const next = getNextUpcoming(project);
-  if (!next) return { tier: "None", class: "bg-zinc-800 text-zinc-300 border border-zinc-700" };
+  if (!next) return { tier: "None", row: "bg-transparent", badge: "bg-zinc-800 text-zinc-300 border border-zinc-700" };
   const d = daysUntil(next.date);
-  if (d <= 3) return { tier: "High", class: "bg-amber-500/15 text-amber-300 border border-amber-700" };
-  if (d <= 10) return { tier: "Medium", class: "bg-yellow-500/10 text-yellow-200 border border-yellow-700" };
-  return { tier: "Low", class: "bg-emerald-600/10 text-emerald-300 border border-emerald-700" };
-}
-
-// Follow-up logic
-function nextFollowUpDate(project) {
-  const cadence = Number(project.cadenceDays || 14);
-  if (!project.lastContact) return null; // treat as needs contact
-  const d = new Date(project.lastContact);
-  d.setDate(d.getDate() + cadence);
-  d.setHours(0,0,0,0);
-  return d;
-}
-function followUpStatus(project) {
-  const cadence = Number(project.cadenceDays || 14);
-  const last = project.lastContact ? new Date(project.lastContact) : null;
-  const next = nextFollowUpDate(project);
-  const now = todayStart();
-  if (!last) {
-    return { text: `No contact yet (cadence ${cadence}d)`, due: true, class: "text-rose-300" };
-  }
-  if (next <= now) {
-    const overdueDays = Math.abs(Math.min(0, daysUntil(next.toISOString().slice(0,10))));
-    return { text: `Follow-up due (${overdueDays}d overdue)`, due: true, class: "text-rose-300" };
-  }
-  return { text: `Next in ${daysUntil(next.toISOString().slice(0,10))}d`, due: false, class: "text-zinc-400" };
+  if (d <= 3) return { tier: "High", row: "bg-amber-950/30", badge: "bg-amber-500/15 text-amber-300 border border-amber-700" };
+  if (d <= 10) return { tier: "Medium", row: "bg-yellow-950/20", badge: "bg-yellow-500/10 text-yellow-200 border border-yellow-700" };
+  return { tier: "Low", row: "bg-emerald-950/20", badge: "bg-emerald-600/10 text-emerald-300 border border-emerald-700" };
 }
 
 // Priority score mixes schedule + value
@@ -166,7 +141,7 @@ function priorityScore(p) {
   if (overdue.length) {
     const worst = Math.min(...overdue.map((ph) => daysUntil(p.milestones[ph])));
     return 100000 + Math.abs(worst)*100 + p.value/1000;
-    }
+  }
   const next = getNextUpcoming(p);
   const d = next ? daysUntil(next.date) : 9999;
   return (60 - Math.min(d, 60))*100 + p.value/1000;
@@ -177,31 +152,31 @@ function extractDateRange(q) {
   const lower = String(q).toLowerCase();
   const now = todayStart();
 
-  if (includesWord(lower, "today"))    return { start: now, end: addDaysDate(now, 1) };
-  if (includesWord(lower, "tomorrow")) return { start: addDaysDate(now, 1), end: addDaysDate(now, 2) };
+  if (includesWord(lower, "today"))    return { start: now, end: new Date(now.getTime()+86400000) };
+  if (includesWord(lower, "tomorrow")) return { start: new Date(now.getTime()+86400000), end: new Date(now.getTime()+2*86400000) };
   if (includesWord(lower, "next 7 days") || includesWord(lower, "next seven days"))
-    return { start: now, end: addDaysDate(now, 7) };
+    return { start: now, end: new Date(now.getTime()+7*86400000) };
   if (includesWord(lower, "next 30 days"))
-    return { start: now, end: addDaysDate(now, 30) };
+    return { start: now, end: new Date(now.getTime()+30*86400000) };
 
   if (includesWord(lower, "this week")) {
     const d = new Date(now);
     const day = d.getDay();
-    const monday = addDaysDate(d, -((day + 6) % 7));
-    const sunday = addDaysDate(monday, 7);
+    const monday = new Date(d); monday.setDate(d.getDate() - ((day + 6) % 7));
+    const sunday = new Date(monday); sunday.setDate(monday.getDate()+7);
     return { start: monday, end: sunday };
   }
   if (includesWord(lower, "next week")) {
     const d = new Date(now);
     const day = d.getDay();
-    const monday = addDaysDate(d, 7 - ((day + 6) % 7));
-    const sunday = addDaysDate(monday, 7);
+    const monday = new Date(d); monday.setDate(d.getDate() + (7 - ((day + 6) % 7)));
+    const sunday = new Date(monday); sunday.setDate(monday.getDate()+7);
     return { start: monday, end: sunday };
   }
   if (includesWord(lower, "this month")) {
     const d = new Date(now);
     const start = new Date(d.getFullYear(), d.getMonth(), 1);
-    const end = new Date(d.getFullYear(), d.getMonth()+1, 1);
+    const end   = new Date(d.getFullYear(), d.getMonth()+1, 1);
     return { start, end };
   }
   if (includesWord(lower, "next month")) {
@@ -245,13 +220,25 @@ function extractDateRange(q) {
   const m = String(q).match(/\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2}(?:,\s*\d{4})?/);
   if (m) {
     const d = tryParseDate(m[0]);
-    if (d) return { start: d, end: addDaysDate(d, 1) };
+    if (d) return { start: d, end: new Date(d.getTime()+86400000) };
   }
   return null;
 }
 
+// Aging helpers: needs phaseSince to be tracked
+function ageInCurrentPhase(p) {
+  if (!p.phaseSince) return null;
+  return Math.max(0, daysSince(p.phaseSince));
+}
+function isStalled(p) {
+  const age = ageInCurrentPhase(p);
+  if (age === null) return false;
+  const limit = STALL_THRESHOLDS[p.phase] ?? 14;
+  return age > limit;
+}
+
 // ------------------------------
-// Demo data (with contact fields)
+// Demo data (with phaseSince to power aging)
 // ------------------------------
 const PROJECTS = [
   {
@@ -260,7 +247,6 @@ const PROJECTS = [
     client: "Atrium Health",
     location: "Charlotte, NC",
     value: 185000,
-    marginPct: 0.34,
     phase: "Manufacturing",
     milestones: {
       Design: "2025-08-22",
@@ -270,12 +256,8 @@ const PROJECTS = [
       Manufacturing: "2025-09-18",
       Installing: "2025-09-20",
     },
-    owner: "Carter Munson",
+    phaseSince: "2025-08-10", // in Manufacturing since Aug 10
     tags: ["Exterior", "Wayfinding"],
-    lastContact: "2025-08-21",
-    cadenceDays: 14,
-    contactPerson: "Facilities PM",
-    contactEmail: "pm@atrium.example",
   },
   {
     id: "SW-2402",
@@ -283,7 +265,6 @@ const PROJECTS = [
     client: "JLL",
     location: "Charlotte, NC",
     value: 92000,
-    marginPct: 0.29,
     phase: "Surveying",
     milestones: {
       Design: "2025-08-26",
@@ -293,12 +274,8 @@ const PROJECTS = [
       Manufacturing: "2025-09-25",
       Installing: "2025-10-05",
     },
-    owner: "Carter Munson",
+    phaseSince: "2025-08-16",
     tags: ["Interior", "Code"],
-    lastContact: "2025-08-18",
-    cadenceDays: 10,
-    contactPerson: "JLL CM",
-    contactEmail: "cm@jll.example",
   },
   {
     id: "SW-2403",
@@ -306,7 +283,6 @@ const PROJECTS = [
     client: "CLT Airport",
     location: "Charlotte, NC",
     value: 410000,
-    marginPct: 0.31,
     phase: "Permitting",
     milestones: {
       Design: "2025-08-24",
@@ -316,12 +292,8 @@ const PROJECTS = [
       Manufacturing: "2025-09-20",
       Installing: "2025-10-01",
     },
-    owner: "Southwood Team",
+    phaseSince: "2025-08-06",
     tags: ["Aviation", "Permitting"],
-    lastContact: "2025-08-10",
-    cadenceDays: 7,
-    contactPerson: "Airport Rep",
-    contactEmail: "rep@cltairport.example",
   },
   {
     id: "SW-2404",
@@ -329,7 +301,6 @@ const PROJECTS = [
     client: "City of Rock Hill",
     location: "Rock Hill, SC",
     value: 145000,
-    marginPct: 0.27,
     phase: "Estimating",
     milestones: {
       Design: "2025-08-25",
@@ -339,12 +310,8 @@ const PROJECTS = [
       Manufacturing: "2025-09-28",
       Installing: "2025-10-03",
     },
-    owner: "C. Munson",
+    phaseSince: "2025-08-19",
     tags: ["Exterior", "Channel Letters"],
-    lastContact: null,
-    cadenceDays: 14,
-    contactPerson: "City Buyer",
-    contactEmail: "buyer@rockhill.example",
   },
   {
     id: "SW-2405",
@@ -352,7 +319,6 @@ const PROJECTS = [
     client: "Novant Health",
     location: "Charlotte, NC",
     value: 56000,
-    marginPct: 0.25,
     phase: "Design",
     milestones: {
       Design: "2025-09-01",
@@ -362,12 +328,8 @@ const PROJECTS = [
       Manufacturing: "2025-09-30",
       Installing: "2025-10-04",
     },
-    owner: "J. Smith",
+    phaseSince: "2025-08-21",
     tags: ["Monument", "Lighting"],
-    lastContact: "2025-08-19",
-    cadenceDays: 21,
-    contactPerson: "Facilities",
-    contactEmail: "fac@novant.example",
   },
   {
     id: "SW-2406",
@@ -375,7 +337,6 @@ const PROJECTS = [
     client: "Ally",
     location: "Charlotte, NC",
     value: 78000,
-    marginPct: 0.32,
     phase: "Installing",
     milestones: {
       Design: "2025-07-28",
@@ -385,12 +346,8 @@ const PROJECTS = [
       Manufacturing: "2025-08-07",
       Installing: "2025-08-08",
     },
-    owner: "Install Crew A",
+    phaseSince: "2025-08-05",
     tags: ["Wayfinding"],
-    lastContact: "2025-08-22",
-    cadenceDays: 7,
-    contactPerson: "Garage Ops",
-    contactEmail: "ops@ally.example",
   },
 ];
 
@@ -457,36 +414,9 @@ function applyAIQuery(projects, query) {
     filtered = filtered.filter((p) => p.client.toLowerCase().includes(name));
   }
 
-  // Follow-up related
-  // "follow-ups due" | "overdue follow-ups" | "not contacted in 14 days" | "contacted today/this week"
-  if (includesWord(lower, "follow-ups due") || includesWord(lower, "overdue follow-ups") || includesWord(lower, "follow up due")) {
-    filtered = filtered.filter((p) => followUpStatus(p).due);
-  }
-  const notContactedMatch = lower.match(/not contacted in (\d+)\s*days?/);
-  if (notContactedMatch) {
-    const n = Number(notContactedMatch[1]);
-    filtered = filtered.filter((p) => {
-      if (!p.lastContact) return true;
-      return daysSince(p.lastContact) >= n;
-    });
-  }
-  if (includesWord(lower, "contacted today")) {
-    filtered = filtered.filter((p) => p.lastContact && daysSince(p.lastContact) === 0);
-  }
-  if (includesWord(lower, "contacted this week")) {
-    const now = todayStart();
-    const day = now.getDay();
-    const monday = addDaysDate(now, -((day + 6) % 7));
-    filtered = filtered.filter((p) => {
-      if (!p.lastContact) return false;
-      const t = new Date(p.lastContact).setHours(0,0,0,0);
-      return t >= monday.getTime();
-    });
-  }
-
   // Focus intent (urgent / right away)
   if (includesWord(lower, "focus") || includesWord(lower, "right away") || includesWord(lower, "urgent")) {
-    const soon = addDaysDate(todayStart(), 7).getTime();
+    const soon = new Date(todayStart().getTime()+7*86400000).getTime();
     filtered = filtered.filter((p) => {
       if (hasOverdue(p)) return true;
       const next = getNextUpcoming(p);
@@ -494,6 +424,19 @@ function applyAIQuery(projects, query) {
       return new Date(next.date).setHours(0,0,0,0) <= soon;
     });
     filtered.sort((a,b) => priorityScore(b) - priorityScore(a));
+  }
+
+  // Aging-focused
+  if (includesWord(lower, "stalled")) {
+    filtered = filtered.filter((p) => isStalled(p));
+  }
+  const olderMatch = lower.match(/in phase over (\d+)\s*days?/);
+  if (olderMatch) {
+    const n = Number(olderMatch[1]);
+    filtered = filtered.filter((p) => {
+      const age = ageInCurrentPhase(p);
+      return age !== null && age > n;
+    });
   }
 
   return filtered;
@@ -510,51 +453,33 @@ function summarizeQuery(projects, query) {
     const lines = list.slice(0, 10).map((p) => {
       const overdue = overduePhases(p);
       const next = getNextUpcoming(p);
+      const age = ageInCurrentPhase(p);
       const badge = overdue.length
         ? `OVERDUE: ${overdue.join(" / ")}`
         : next
         ? `${next.phase} ${new Date(next.date).toLocaleDateString()} (${relLabel(next.date)})`
         : "No upcoming";
-      return `• ${p.id} — ${p.name} (${p.client}) — ${currency(p.value)} — ${badge}`;
+      return `• ${p.id} — ${p.name} (${p.client}) — ${currency(p.value)} — ${badge} — Age ${age ?? "?"}d`;
     }).join("\n");
     return `Focus Now (${count}):\n${lines}`;
   }
 
-  // Highest value / by client
+  if (lower.includes("stalled") || lower.match(/in phase over \d+\s*days?/)) {
+    const lines = list.slice(0, 12).map((p) => {
+      const age = ageInCurrentPhase(p) ?? "-";
+      const limit = STALL_THRESHOLDS[p.phase] ?? 14;
+      return `• ${p.id} — ${p.name} (${p.phase}) — Age ${age}d (limit ${limit}d)`;
+    }).join("\n");
+    return `Stalled / aging (${list.length}):\n${lines}`;
+  }
+
   if (lower.includes("highest value") || lower.includes("top value") || lower.includes("largest") || lower.includes("biggest") || lower.includes("highest total value")) {
-    // by client
-    if (lower.includes("client") || lower.includes("clients") || lower.includes("by client")) {
-      const groups = groupTotalsByClient(list);
-      const top5 = groups.slice(0, 5)
-        .map((g, i) => `${i + 1}. ${g.client} — ${currency(g.total)} (${g.count} project${g.count === 1 ? "" : "s"})`)
-        .join("\n");
-      const leader = groups[0] ? `${groups[0].client} at ${currency(groups[0].total)}` : "(none)";
-      return `Top clients by total value (${groups.length}):\n${top5}\nLeader: ${leader}`;
-    }
     const top = [...list].sort((a,b) => b.value - a.value).slice(0, 5);
     const lines = top.map((p,i) => `${i+1}. ${p.id} — ${p.name} (${p.client}) — ${currency(p.value)}`).join("\n");
     const maxLine = top[0] ? `Highest: ${top[0].id} — ${currency(top[0].value)}` : "Highest: (none)";
     return `Top value projects (${count} total, ${currency(total)} combined):\n${lines}\n${maxLine}`;
   }
 
-  // Follow-ups summary
-  if (includesWord(lower, "follow-ups due") || includesWord(lower, "overdue follow-ups") || includesWord(lower, "follow up due") || lower.match(/not contacted in \d+\s*days?/)) {
-    const due = list.filter((p) => followUpStatus(p).due);
-    const lines = due.slice(0, 12).map((p) => {
-      const s = followUpStatus(p);
-      return `• ${p.id} — ${p.name} (${p.client}) — ${s.text}`;
-    }).join("\n");
-    return `Follow-ups (${due.length} due, ${list.length} matched):\n${lines}`;
-  }
-
-  // Phase breakdown
-  if (lower.includes("phase breakdown") || lower.includes("by phase")) {
-    const counts = PHASES.map((ph) => ({ ph, n: list.filter((p) => p.phase === ph).length }));
-    const line = counts.map((c) => `${c.ph}: ${c.n}`).join(" • ");
-    return `Phase breakdown (${count} projects): ${line}`;
-  }
-
-  // Overdue list
   if (lower.includes("overdue") && wantsList) {
     const lines = list.map((p) =>
       `• ${p.id} — ${p.name} — OVERDUE: ${overduePhases(p).join(", ")}`
@@ -562,7 +487,6 @@ function summarizeQuery(projects, query) {
     return `${list.length} overdue:\n${lines}`;
   }
 
-  // Date window list
   if (extractDateRange(lower)) {
     const lines = list.slice(0, 15).map((p) => {
       const next = getNextUpcoming(p);
@@ -588,18 +512,6 @@ function summarizeQuery(projects, query) {
   return `${count} match • Total ${currency(total)} • Next due: ${nextThree.join(", ") || "(none)"}`;
 }
 
-function groupTotalsByClient(projects) {
-  const map = new Map();
-  for (const p of projects) {
-    const v = map.get(p.client) || { total:0, count:0 };
-    v.total += p.value; v.count += 1;
-    map.set(p.client, v);
-  }
-  return [...map.entries()]
-    .map(([client, v]) => ({ client, ...v }))
-    .sort((a,b) => b.total - a.total);
-}
-
 // ------------------------------
 // Tiny card primitives
 // ------------------------------
@@ -623,19 +535,10 @@ function App() {
   // load / migrate
   const [projects, setProjects] = React.useState(() => {
     try {
-      const raw = localStorage.getItem("southwood_projects_v3"); // new key
+      const raw = localStorage.getItem("southwood_projects_v4"); // new key
       if (raw) return JSON.parse(raw);
-      // migrate from v2 if present
-      const legacy = localStorage.getItem("southwood_projects_v2");
-      const base = legacy ? JSON.parse(legacy) : PROJECTS;
-      // add contact defaults if missing
-      return base.map((p) => ({
-        cadenceDays: 14,
-        lastContact: null,
-        contactPerson: "",
-        contactEmail: "",
-        ...p,
-      }));
+      // seed defaults
+      return PROJECTS;
     } catch {
       return PROJECTS;
     }
@@ -644,96 +547,36 @@ function App() {
 
   React.useEffect(() => {
     try {
-      localStorage.setItem("southwood_projects_v3", JSON.stringify(projects));
+      localStorage.setItem("southwood_projects_v4", JSON.stringify(projects));
     } catch {}
   }, [projects]);
 
+  // Tabs
   const [tab, setTab] = React.useState("projects"); // "projects" | "quotes" | "calendar"
 
-  // Filters
+  // Filters / AI
   const [search, setSearch] = React.useState("");
   const [phasesFilter, setPhasesFilter] = React.useState([...PHASES]);
   const [minVal, setMinVal] = React.useState("");
   const [maxVal, setMaxVal] = React.useState("");
-  const [sortBy, setSortBy] = React.useState("priority"); // "priority" | "next" | "value" | "risk"
-
-  // AI query
   const [aiQuery, setAiQuery] = React.useState("");
   const [aiAnswer, setAiAnswer] = React.useState("");
 
-  // Quick Add
-  const [qaName, setQaName] = React.useState("");
-  const [qaClient, setQaClient] = React.useState("");
-  const [qaLocation, setQaLocation] = React.useState("Rock Hill, SC");
-  const [qaValue, setQaValue] = React.useState("");
-  const [qaPhase, setQaPhase] = React.useState("Design");
-  const [qaContact, setQaContact] = React.useState("");
-  const [qaEmail, setQaEmail] = React.useState("");
-  const [qaCadence, setQaCadence] = React.useState("14");
-  const [qaMsg, setQaMsg] = React.useState(null);
+  // Sorting (clickable headers)
+  const [sortKey, setSortKey] = React.useState("priority"); // "priority" | "project" | "client" | "value" | "phase" | "next" | "age"
+  const [sortDir, setSortDir] = React.useState("desc"); // "asc" | "desc"
 
-  // Inline edit
+  // Inline value edit
+  const [editValueId, setEditValueId] = React.useState(null);
+  const [valueDraft, setValueDraft] = React.useState("");
+
+  // Edit panel
   const [editId, setEditId] = React.useState(null);
   const [editPhase, setEditPhase] = React.useState("Design");
   const [editMilestones, setEditMilestones] = React.useState({});
-  const [editLastContact, setEditLastContact] = React.useState("");
-  const [editCadence, setEditCadence] = React.useState("14");
+  const [editPhaseSince, setEditPhaseSince] = React.useState("");
+
   const [toast, setToast] = React.useState("");
-
-  const filtered = React.useMemo(() => {
-    let list = projects.filter((p) => phasesFilter.includes(p.phase));
-
-    if (minVal) list = list.filter((p) => p.value >= Number(minVal));
-    if (maxVal) list = list.filter((p) => p.value <= Number(maxVal));
-
-    if (search.trim()) {
-      const s = search.toLowerCase();
-      list = list.filter((p) =>
-        [p.id, p.name, p.client, p.location, p.contactPerson, p.contactEmail].some((x) => String(x || "").toLowerCase().includes(s))
-      );
-    }
-
-    if (aiQuery.trim()) list = applyAIQuery(list, aiQuery);
-
-    if (sortBy === "priority") {
-      list.sort((a,b) => priorityScore(b) - priorityScore(a));
-    } else if (sortBy === "next") {
-      list.sort((a,b) => {
-        const na = (getNextUpcoming(a)?.date || getOverallDue(a.milestones) || "9999-12-31");
-        const nb = (getNextUpcoming(b)?.date || getOverallDue(b.milestones) || "9999-12-31");
-        return new Date(na) - new Date(nb);
-      });
-    } else if (sortBy === "value") {
-      list.sort((a,b) => b.value - a.value);
-    } else if (sortBy === "risk") {
-      const order = { Overdue: 0, High: 1, Medium: 2, Low: 3, None: 4 };
-      list.sort((a,b) => order[riskTier(a).tier] - order[riskTier(b).tier]);
-    }
-
-    return list;
-  }, [projects, phasesFilter, minVal, maxVal, search, aiQuery, sortBy]);
-
-  const kpi = React.useMemo(() => {
-    const now = todayStart().getTime();
-    const in30 = addDaysDate(todayStart(), 30).getTime();
-    const dueSoon = projects.filter((p) =>
-      PHASES.some((ph) => {
-        const d = p.milestones[ph];
-        if (!d) return false;
-        const t = new Date(d).getTime();
-        return t >= now && t <= in30;
-      })
-    ).length;
-
-    const atRisk = projects.filter((p) => hasOverdue(p)).length;
-    const totalValue = projects.reduce((s,p) => s + p.value, 0);
-    const pipeline = quotes.reduce((acc, q) => acc + q.amount * q.probability, 0);
-
-    // follow-ups due
-    const followDue = projects.filter((p) => followUpStatus(p).due).length;
-
-    return { active: projects.length, pipeline, dueSoon, atRisk, totalValue, followDue };
-  }, [projects, quotes]);
 
   function togglePhaseFilter(ph) {
     setPhasesFilter((prev) =>
@@ -741,10 +584,17 @@ function App() {
     );
   }
 
+  // Quick Add
+  const [qaName, setQaName] = React.useState("");
+  const [qaClient, setQaClient] = React.useState("");
+  const [qaLocation, setQaLocation] = React.useState("Rock Hill, SC");
+  const [qaValue, setQaValue] = React.useState("");
+  const [qaPhase, setQaPhase] = React.useState("Design");
   function addProject() {
     const valueNum = Number(String(qaValue).replace(/,/g, ""));
     if (!qaName || !qaClient || Number.isNaN(valueNum)) {
-      setQaMsg("Please fill Project Name, Client, and a numeric Value.");
+      setToast("Fill Project Name, Client, and a numeric Value.");
+      setTimeout(()=>setToast(""), 2000);
       return;
     }
     const base = todayStart();
@@ -768,26 +618,21 @@ function App() {
       value: valueNum,
       phase: qaPhase,
       milestones: m,
-      owner: "You",
+      phaseSince: todayStart().toISOString().slice(0,10),
       tags: [],
-      contactPerson: qaContact.trim(),
-      contactEmail: qaEmail.trim(),
-      cadenceDays: Number(qaCadence || "14"),
-      lastContact: null,
     };
     setProjects((prev) => [newP, ...prev]);
     setQaName(""); setQaClient(""); setQaLocation("Rock Hill, SC");
-    setQaValue(""); setQaPhase("Design"); setQaContact(""); setQaEmail(""); setQaCadence("14");
-    setQaMsg(`Added ${newP.id}`);
-    setTimeout(() => setQaMsg(null), 2500);
+    setQaValue(""); setQaPhase("Design");
+    setToast(`Added ${newP.id}`);
+    setTimeout(()=>setToast(""), 1500);
   }
 
   function startEdit(p) {
     setEditId(p.id);
     setEditPhase(p.phase);
     setEditMilestones({ ...p.milestones });
-    setEditLastContact(p.lastContact || "");
-    setEditCadence(String(p.cadenceDays || 14));
+    setEditPhaseSince(p.phaseSince || "");
   }
   function saveEdit() {
     if (!editId) return;
@@ -798,21 +643,31 @@ function App() {
               ...p,
               phase: editPhase,
               milestones: { ...editMilestones },
-              lastContact: editLastContact || null,
-              cadenceDays: Number(editCadence || "14"),
+              // If phase changed, update phaseSince to today (unless user set it manually)
+              phaseSince:
+                p.phase !== editPhase
+                  ? (editPhaseSince || todayStart().toISOString().slice(0,10))
+                  : (editPhaseSince || p.phaseSince || todayStart().toISOString().slice(0,10)),
             }
           : p
       )
     );
     setEditId(null);
   }
-  function logContact(p) {
-    const todayISO = todayStart().toISOString().slice(0,10);
-    setProjects((prev) => prev.map((x) => x.id === p.id ? { ...x, lastContact: todayISO } : x));
-    setToast(`Logged contact for ${p.id} (${p.client})`);
-    setTimeout(() => setToast(""), 2000);
+
+  // Inline value edit handlers
+  function beginValueEdit(p) {
+    setEditValueId(p.id);
+    setValueDraft(String(p.value));
+  }
+  function commitValueEdit(p) {
+    const v = Number(String(valueDraft).replace(/,/g, ""));
+    if (!Number.isFinite(v)) { setEditValueId(null); return; }
+    setProjects((prev) => prev.map(x => x.id === p.id ? { ...x, value: v } : x));
+    setEditValueId(null);
   }
 
+  // AI
   function runAI() {
     if (!aiQuery.trim()) {
       setAiAnswer("Type a question or pick a chip.");
@@ -820,18 +675,110 @@ function App() {
     }
     setAiAnswer(summarizeQuery(projects, aiQuery));
   }
-
   const chips = [
     "what should I focus on",
     "which projects are overdue",
     "due next 7 days",
     "highest value projects",
-    "top clients by highest total value",
-    "follow-ups due",
-    "not contacted in 14 days",
-    "contacted this week",
-    "overdue in permitting",
+    "client: CLT Airport",
+    "Design in September",
+    "stalled",
+    "in phase over 14 days",
   ];
+
+  // Derived lists
+  const filtered = React.useMemo(() => {
+    let list = projects.filter((p) => phasesFilter.includes(p.phase));
+
+    if (minVal) list = list.filter((p) => p.value >= Number(minVal));
+    if (maxVal) list = list.filter((p) => p.value <= Number(maxVal));
+
+    if (search.trim()) {
+      const s = search.toLowerCase();
+      list = list.filter((p) =>
+        [p.id, p.name, p.client, p.location].some((x) => String(x || "").toLowerCase().includes(s))
+      );
+    }
+
+    if (aiQuery.trim()) list = applyAIQuery(list, aiQuery);
+
+    // Sorting
+    const cmpAsc = (a,b)=> (a<b?-1:a>b?1:0);
+    const cmpDesc= (a,b)=> (a<b?1:a>b?-1:0);
+
+    list.sort((A,B) => {
+      let a, b;
+      switch (sortKey) {
+        case "project": a = A.name.toLowerCase(); b = B.name.toLowerCase(); break;
+        case "client":  a = A.client.toLowerCase(); b = B.client.toLowerCase(); break;
+        case "value":   a = A.value; b = B.value; break;
+        case "phase":   a = A.phase; b = B.phase; break;
+        case "next": {
+          const na = (getNextUpcoming(A)?.date || "9999-12-31");
+          const nb = (getNextUpcoming(B)?.date || "9999-12-31");
+          a = new Date(na).getTime(); b = new Date(nb).getTime(); break;
+        }
+        case "age": {
+          a = ageInCurrentPhase(A) ?? 0; b = ageInCurrentPhase(B) ?? 0; break;
+        }
+        default: // "priority"
+          a = priorityScore(A); b = priorityScore(B); break;
+      }
+      const cmp = sortDir === "asc" ? cmpAsc(a,b) : cmpDesc(a,b);
+      return cmp;
+    });
+
+    return list;
+  }, [projects, phasesFilter, minVal, maxVal, search, aiQuery, sortKey, sortDir]);
+
+  const kpi = React.useMemo(() => {
+    const now = todayStart().getTime();
+    const in30 = now + 30*86400000;
+    const dueSoon = projects.filter((p) =>
+      PHASES.some((ph) => {
+        const d = p.milestones[ph];
+        if (!d) return false;
+        const t = new Date(d).getTime();
+        return t >= now && t <= in30;
+      })
+    ).length;
+
+    const atRisk = projects.filter((p) => hasOverdue(p)).length;
+    const totalValue = projects.reduce((s,p) => s + p.value, 0);
+    const pipeline = quotes.reduce((acc, q) => acc + q.amount * q.probability, 0);
+
+    // Aging KPIs
+    const ages = projects.map((p) => ageInCurrentPhase(p)).filter((x) => x !== null);
+    const avgAge = ages.length ? Math.round(ages.reduce((a,b)=>a+b,0)/ages.length) : 0;
+    const stalled = projects.filter((p) => isStalled(p)).length;
+
+    return { active: projects.length, pipeline, dueSoon, atRisk, totalValue, avgAge, stalled };
+  }, [projects, quotes]);
+
+  // Helpers for header sorting UI
+  function headerSort(label, key) {
+    const isActive = sortKey === key;
+    const arrow = isActive ? (sortDir === "asc" ? "▲" : "▼") : "↕";
+    return (
+      <button
+        onClick={() => {
+          if (sortKey === key) setSortDir((d)=> d==="asc"?"desc":"asc");
+          else { setSortKey(key); setSortDir(key==="project"||key==="client"||key==="phase" ? "asc" : "desc"); }
+        }}
+        className={`inline-flex items-center gap-1 select-none ${isActive ? "text-zinc-200" : "text-zinc-400"} hover:text-zinc-100`}
+        title={`Sort by ${label}`}
+      >
+        <span>{label}</span><span className="text-xs">{arrow}</span>
+      </button>
+    );
+  }
+
+  function runClear() {
+    setPhasesFilter([...PHASES]);
+    setMinVal(""); setMaxVal("");
+    setAiQuery(""); setAiAnswer("");
+    setSearch(""); setSortKey("priority"); setSortDir("desc");
+  }
 
   return (
     <div className="min-h-screen bg-[#0b1020] text-zinc-100">
@@ -849,26 +796,11 @@ function App() {
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by ID, client, contact…"
+              placeholder="Search by ID, client, location…"
               className="w-72 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-zinc-600"
             />
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value)}
-              className="bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"
-            >
-              <option value="priority">Sort: Priority</option>
-              <option value="next">Sort: Next Due</option>
-              <option value="value">Sort: Value</option>
-              <option value="risk">Sort: Risk</option>
-            </select>
             <button
-              onClick={() => {
-                setPhasesFilter([...PHASES]);
-                setMinVal(""); setMaxVal("");
-                setAiQuery(""); setAiAnswer("");
-                setSearch(""); setSortBy("priority");
-              }}
+              onClick={runClear}
               className="px-3 py-2 rounded-lg bg-zinc-800 text-zinc-100 text-sm hover:bg-zinc-700"
             >
               Reset
@@ -908,9 +840,9 @@ function App() {
             </CardContent></Card>
 
             <Card><CardContent className="p-5">
-              <p className="text-xs uppercase tracking-widest text-zinc-400">Follow-ups Due</p>
-              <p className="text-3xl mt-2 font-semibold">{kpi.followDue}</p>
-              <p className="text-xs text-zinc-400 mt-1">Based on last contact + cadence</p>
+              <p className="text-xs uppercase tracking-widest text-zinc-400">Avg Days in Phase</p>
+              <p className="text-3xl mt-2 font-semibold">{kpi.avgAge}</p>
+              <p className="text-xs text-zinc-400 mt-1">Stalled: {kpi.stalled}</p>
             </CardContent></Card>
           </div>
 
@@ -950,14 +882,14 @@ function App() {
                         value={aiQuery}
                         onChange={(e)=>setAiQuery(e.target.value)}
                         onKeyDown={(e)=>{ if (e.key === "Enter") runAI(); }}
-                        placeholder="Try: 'follow-ups due', 'not contacted in 14 days', 'overdue in permitting', 'due next 7 days', 'top clients by highest total value'"
+                        placeholder="Try: 'stalled', 'in phase over 14 days', 'due next 7 days', 'which projects are overdue', 'highest value projects', 'client: CLT Airport'"
                         className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"
                       />
                       <button onClick={runAI} className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm">Ask</button>
                       <button onClick={()=>{ setAiQuery(""); setAiAnswer(""); }} className="px-3 py-2 rounded-lg bg-zinc-800 text-sm">Clear</button>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      {chips.map((c) => (
+                      {["what should I focus on","which projects are overdue","due next 7 days","highest value projects","Design in September","stalled","in phase over 14 days"].map((c) => (
                         <button key={c} onClick={()=>{ setAiQuery(c); setTimeout(runAI, 0); }} className="px-2.5 py-1.5 text-xs rounded-full border border-zinc-800 bg-zinc-900 hover:bg-zinc-800">
                           {c}
                         </button>
@@ -974,13 +906,13 @@ function App() {
                     <table className="min-w-full text-sm">
                       <thead className="bg-zinc-900/80 text-zinc-400 uppercase text-xs">
                         <tr>
-                          <th className="text-left py-3 px-3">Project</th>
-                          <th className="text-left py-3 px-3">Client</th>
-                          <th className="text-left py-3 px-3">Value</th>
-                          <th className="text-left py-3 px-3">Phase</th>
-                          <th className="text-left py-3 px-3">Next Due</th>
+                          <th className="text-left py-3 px-3">{headerSort("Project","project")}</th>
+                          <th className="text-left py-3 px-3">{headerSort("Client","client")}</th>
+                          <th className="text-left py-3 px-3">{headerSort("Value","value")}</th>
+                          <th className="text-left py-3 px-3">{headerSort("Phase","phase")}</th>
+                          <th className="text-left py-3 px-3">{headerSort("Next Due","next")}</th>
+                          <th className="text-left py-3 px-3">{headerSort("Age (days)","age")}</th>
                           <th className="text-left py-3 px-3">Risk</th>
-                          <th className="text-left py-3 px-3">Follow-up</th>
                           <th className="text-right py-3 px-3">Actions</th>
                         </tr>
                       </thead>
@@ -989,27 +921,41 @@ function App() {
                           const next = getNextUpcoming(p);
                           const overdue = overduePhases(p);
                           const risk = riskTier(p);
-                          const fup = followUpStatus(p);
+                          const age = ageInCurrentPhase(p);
+                          const stalled = isStalled(p);
+
                           return (
                             <React.Fragment key={p.id}>
-                              <tr className="border-t border-zinc-800 text-zinc-200 align-top">
+                              <tr className={`border-t border-zinc-800 text-zinc-200 align-top ${risk.row}`}>
                                 <td className="py-3 px-3 font-medium">
-                                  <div className="flex flex-col">
-                                    <span className="inline-flex items-center gap-2">
-                                      <span className="bg-zinc-800 text-[11px] px-2 py-0.5 rounded-full">{p.id}</span>
-                                      {p.name}
-                                    </span>
-                                    <span className="text-xs text-zinc-400">{p.location}</span>
-                                    {p.contactPerson || p.contactEmail ? (
-                                      <span className="text-xs text-zinc-500 mt-0.5">Contact: {p.contactPerson || "—"} {p.contactEmail ? `• ${p.contactEmail}` : ""}</span>
-                                    ) : null}
-                                  </div>
+                                  <span className="inline-flex items-center gap-2">
+                                    <span className="bg-zinc-800 text-[11px] px-2 py-0.5 rounded-full">{p.id}</span>
+                                    {p.name}
+                                  </span>
+                                  <div className="text-xs text-zinc-500">{p.location}</div>
                                 </td>
                                 <td className="py-3 px-3">{p.client}</td>
-                                <td className="py-3 px-3 font-semibold">{currency(p.value)}</td>
+
+                                {/* Inline value edit */}
+                                <td className="py-3 px-3 font-semibold">
+                                  {editValueId === p.id ? (
+                                    <input
+                                      autoFocus
+                                      value={valueDraft}
+                                      onChange={(e)=>setValueDraft(e.target.value)}
+                                      onBlur={()=>commitValueEdit(p)}
+                                      onKeyDown={(e)=>{ if (e.key === "Enter") commitValueEdit(p); if (e.key==="Escape") setEditValueId(null); }}
+                                      className="w-28 bg-zinc-900 border border-zinc-700 rounded px-2 py-1"
+                                    />
+                                  ) : (
+                                    <button onClick={()=>beginValueEdit(p)} className="hover:underline">{currency(p.value)}</button>
+                                  )}
+                                </td>
+
                                 <td className="py-3 px-3">
                                   <span className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-white text-xs ${phaseColor[p.phase]}`}>{p.phase}</span>
                                 </td>
+
                                 <td className="py-3 px-3 whitespace-nowrap">
                                   {next ? (
                                     <span>
@@ -1022,34 +968,34 @@ function App() {
                                     <span className="block text-xs text-rose-400">Overdue: {overdue.join(", ")}</span>
                                   )}
                                 </td>
+
                                 <td className="py-3 px-3">
-                                  <span className={`inline-block text-xs px-2 py-1 rounded-lg ${risk.class}`}>{risk.tier}</span>
-                                </td>
-                                <td className="py-3 px-3 whitespace-nowrap">
                                   <div className="flex items-center gap-2">
-                                    <span className={`text-xs ${fup.class}`}>{fup.text}</span>
-                                  </div>
-                                  <div className="text-xs text-zinc-500">
-                                    Last: {p.lastContact ? new Date(p.lastContact).toLocaleDateString() : "—"} • Cadence: {p.cadenceDays || 14}d
+                                    <span className="text-sm">{age ?? "—"}</span>
+                                    {stalled && <span className="text-xs text-rose-300">• Stalled</span>}
                                   </div>
                                 </td>
-                                <td className="py-3 px-3 text-right space-x-2">
-                                  <button onClick={()=>logContact(p)} className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Log Contact</button>
+
+                                <td className="py-3 px-3">
+                                  <span className={`inline-block text-xs px-2 py-1 rounded-lg ${risk.badge}`}>{risk.tier}</span>
+                                </td>
+
+                                <td className="py-3 px-3 text-right">
                                   <button onClick={()=>startEdit(p)} className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Edit</button>
                                 </td>
                               </tr>
+
+                              {/* Inline edit row */}
                               {editId === p.id && (
                                 <tr className="bg-zinc-950/60 border-t border-zinc-900">
                                   <td colSpan={8} className="px-4 py-4">
                                     <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                                      {/* phase */}
                                       <div className="space-y-2">
                                         <label className="text-xs text-zinc-400">Current Phase</label>
                                         <select value={editPhase} onChange={(e)=>setEditPhase(e.target.value)} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm">
                                           {PHASES.map((ph)=> <option key={ph} value={ph}>{ph}</option>)}
                                         </select>
                                       </div>
-                                      {/* milestones */}
                                       {PHASES.map((ph) => (
                                         <div key={ph} className="space-y-2">
                                           <label className="text-xs text-zinc-400">{ph} Due Date</label>
@@ -1061,14 +1007,14 @@ function App() {
                                           />
                                         </div>
                                       ))}
-                                      {/* contact tracking */}
                                       <div className="space-y-2">
-                                        <label className="text-xs text-zinc-400">Last Contact</label>
-                                        <input type="date" value={editLastContact} onChange={(e)=>setEditLastContact(e.target.value)} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
-                                      </div>
-                                      <div className="space-y-2">
-                                        <label className="text-xs text-zinc-400">Cadence (days)</label>
-                                        <input type="number" min="1" value={editCadence} onChange={(e)=>setEditCadence(e.target.value)} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
+                                        <label className="text-xs text-zinc-400">Phase Since</label>
+                                        <input
+                                          type="date"
+                                          value={editPhaseSince}
+                                          onChange={(e)=>setEditPhaseSince(e.target.value)}
+                                          className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"
+                                        />
                                       </div>
                                     </div>
                                     <div className="flex items-center justify-end gap-2 mt-4">
@@ -1140,11 +1086,12 @@ function App() {
                 Ask anything — filters the table and gives a summary:
                 <ul className="list-disc pl-5 mt-2 space-y-1">
                   <li>what should I focus on</li>
-                  <li>follow-ups due</li>
-                  <li>not contacted in 14 days</li>
-                  <li>overdue in permitting</li>
+                  <li>which projects are overdue</li>
                   <li>due next 7 days</li>
-                  <li>top clients by highest total value</li>
+                  <li>highest value projects</li>
+                  <li>Design in September</li>
+                  <li>stalled</li>
+                  <li>in phase over 14 days</li>
                 </ul>
               </div>
               <div className="flex gap-2">
@@ -1178,23 +1125,15 @@ function App() {
                   {PHASES.map((s)=> <option key={s} value={s}>{s}</option>)}
                 </select>
               </div>
-              <div className="flex gap-2">
-                <input value={qaContact} onChange={(e)=>setQaContact(e.target.value)} placeholder="Contact Person" className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm" />
-                <input value={qaEmail} onChange={(e)=>setQaEmail(e.target.value)} placeholder="Contact Email" className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm" />
-              </div>
-              <div className="flex gap-2">
-                <input value={qaCadence} onChange={(e)=>setQaCadence(e.target.value)} placeholder="Cadence (days)" inputMode="numeric" className="w-40 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm" />
-              </div>
               <button onClick={addProject} className="w-full bg-emerald-600 hover:bg-emerald-500 px-3 py-2 rounded-lg text-sm font-medium">Add Project</button>
-              {qaMsg && <p className="text-xs text-emerald-400">{qaMsg}</p>}
-              <p className="text-xs text-zinc-400">Auto-seeded milestones; set exact dates via <b>Edit</b>. Contact tracking is optional but powerful.</p>
+              <p className="text-xs text-zinc-400">Auto-seeded milestones; set exact dates via <b>Edit</b>. Phase aging starts today for new projects.</p>
             </CardContent>
           </Card>
         </aside>
       </main>
 
       <footer className="max-w-7xl mx-auto px-4 pb-10 text-xs text-zinc-500">
-        Priority + Risk badges • Overdue awareness • Follow-up tracking • Value rollups • Local persistence
+        Risk tints • Click-to-sort • Inline value edit • Extra AI chips • Aging & stalled flags • Local persistence
       </footer>
 
       {/* Toast */}
