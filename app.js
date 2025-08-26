@@ -1,16 +1,25 @@
-// Southwood Project Tracker — Full + Completion Tracking (Blank Start)
-// Keeps: Risk Tints • Sort • Inline Value Edit • AI Chips/Queries • Aging/Stalled
-//        Contact tracking (lastContact, cadenceDays) • ICS reminders (milestone & follow-up)
-//        Edit panel (milestones, phaseSince, contacts) • KPIs • Delete per row • Clear All
-// Adds:  Per-phase Done dates • Mark Phase Done (with optional auto-advance)
-//        Complete Project • On-time/Late flags • Hide Completed (default ON)
-// Storage key: v8 (fresh)
+// Southwood Project Tracker — v9
+// Adds: Auto-cascade dates • Simple per-phase "Done Date" (with Today button)
+// Keeps: Risk tints • Sort • Inline value edit • AI queries • Aging/Stalled
+//        Follow-ups (Last Contact + Follow-up every days) • ICS reminders
+//        KPIs • Delete • Clear All • Blank start
+// Storage key: southwood_projects_v9
 
 // =====================================
 // Constants & helpers
 // =====================================
 const PHASES = ["Design","Estimating","Permitting","Surveying","Manufacturing","Installing"];
-const MONTHS = ["january","february","march","april","may","june","july","august","september","october","november","december"];
+
+// Timeline shape (relative offsets in days from a base)
+// Used for auto-seeding & cascading around an anchor phase/date.
+const OFFSETS = {
+  Design: 0,
+  Estimating: 7,
+  Permitting: 21,
+  Surveying: 28,
+  Manufacturing: 60,
+  Installing: 75,
+};
 
 const phaseColor = {
   Design: "bg-sky-600",
@@ -20,6 +29,8 @@ const phaseColor = {
   Manufacturing: "bg-fuchsia-600",
   Installing: "bg-emerald-600",
 };
+
+const MONTHS = ["january","february","march","april","may","june","july","august","september","october","november","december"];
 
 const currency = (n) => Number(n).toLocaleString(undefined,{style:"currency",currency:"USD",maximumFractionDigits:0});
 function todayStart(){ const t=new Date(); t.setHours(0,0,0,0); return t; }
@@ -112,7 +123,7 @@ function priorityScore(p){
 }
 
 // =====================================
-// Follow-ups (lastContact + cadenceDays)
+// Follow-ups (Last Contact + "Follow-up every (days)")
 // =====================================
 function nextFollowUpDate(p){
   const cadence=Number(p.cadenceDays||14); if(!p.lastContact) return null;
@@ -121,7 +132,7 @@ function nextFollowUpDate(p){
 function followUpStatus(p){
   if (p.completedAt) return { text:"Project complete", due:false, class:"text-zinc-400" };
   const cadence=Number(p.cadenceDays||14); const last=p.lastContact?new Date(p.lastContact):null; const next=nextFollowUpDate(p); const now=todayStart();
-  if(!last) return { text:`No contact yet (cadence ${cadence}d)`, due:true, class:"text-rose-300" };
+  if(!last) return { text:`No contact yet (every ${cadence}d)`, due:true, class:"text-rose-300" };
   if(next<=now){ const od=Math.abs(Math.min(0,daysUntil(next.toISOString().slice(0,10)))); return { text:`Follow-up due (${od}d overdue)`, due:true, class:"text-rose-300" }; }
   return { text:`Next in ${daysUntil(next.toISOString().slice(0,10))}d`, due:false, class:"text-zinc-400" };
 }
@@ -133,7 +144,7 @@ function addMilestoneICS(p){
 function addFollowUpICS(p){
   const next=nextFollowUpDate(p); const dateISO=next?next.toISOString().slice(0,10):todayStart().toISOString().slice(0,10);
   const label=next?"Follow-up":"Initial follow-up";
-  const ics=makeICS({ summary:`${p.id} — ${p.name}: ${label}`, description:`Cadence ${p.cadenceDays||14}d • Contact ${p.contactPerson||""} ${p.contactEmail||""}`, dateISO });
+  const ics=makeICS({ summary:`${p.id} — ${p.name}: ${label}`, description:`Every ${p.cadenceDays||14}d • Contact ${p.contactPerson||""} ${p.contactEmail||""}`, dateISO });
   downloadTextFile(`${p.id}-follow-up.ics`, ics, "text/calendar");
 }
 
@@ -143,18 +154,12 @@ function addFollowUpICS(p){
 function isPhaseOnTime(p, ph) {
   const doneAt = p?.done?.[ph];
   const due = p?.milestones?.[ph];
-  if (!doneAt || !due) return null; // unknown
+  if (!doneAt || !due) return null;
   return new Date(doneAt).setHours(0,0,0,0) <= new Date(due).setHours(0,0,0,0);
 }
-function nextPhase(ph){
-  const idx = PHASES.indexOf(ph);
-  return idx>=0 && idx<PHASES.length-1 ? PHASES[idx+1] : null;
-}
-
-// These two rely on setProjects in component scope; we wrap them inside component later as closures.
 
 // =====================================
-// “AI” query parsing
+// AI parsing (same as v8 + completed filters)
 // =====================================
 function extractDateRange(q){
   const lower=String(q).toLowerCase(); const now=todayStart();
@@ -174,13 +179,12 @@ function extractDateRange(q){
   if(m){ const d=tryParseDate(m[0]); if(d) return {start:d,end:new Date(d.getTime()+86400000)}; }
   return null;
 }
-
 function applyAIQuery(projects, query){
   if(!String(query).trim()) return projects;
   let list=[...projects];
   const lower=String(query).toLowerCase();
 
-  // completed / not completed filters
+  // completed filters
   if (includesWord(lower,"completed on time")) {
     list = list.filter(p => p.completedAt && (!p.milestones?.Installing || new Date(p.completedAt) <= new Date(p.milestones.Installing)));
   } else if (includesWord(lower,"completed late")) {
@@ -191,15 +195,15 @@ function applyAIQuery(projects, query){
     list = list.filter(p => !p.completedAt);
   }
 
-  // value over/under
+  // $ filters
   const over=readAmountAfter(query,"over"); if(over!==null) list=list.filter(p=>p.value>over);
   const under=readAmountAfter(query,"under"); if(under!==null) list=list.filter(p=>p.value<under);
 
-  // phase mentions
+  // phases
   const mentioned=PHASES.filter(ph=>includesWord(lower, ph.toLowerCase()));
   if(mentioned.length) list=list.filter(p=>mentioned.some(ph=>p.milestones?.[ph] || p.phase===ph));
 
-  // overdue keyword (optionally scoped)
+  // overdue
   if(includesWord(lower,"overdue")){
     list=list.filter(p=>{
       if(!mentioned.length) return hasOverdue(p);
@@ -244,7 +248,6 @@ function applyAIQuery(projects, query){
 
   return list;
 }
-
 function summarizeQuery(projects, query){
   const list=applyAIQuery(projects, query);
   const count=list.length; const total=list.reduce((s,p)=>s+p.value,0);
@@ -268,7 +271,7 @@ function summarizeQuery(projects, query){
     return `Focus Now (${count}):\n${lines}`;
   }
 
-  if(lower.includes("follow-ups due")||lower.includes("overdue follow-ups")||lower.includes("follow up due")||lower.match(/not contacted in \d+\s*days?/)){
+  if(lower.includes("follow-ups due")||lower.includes("overdue follow-ups")||lower.match(/not contacted in \d+\s*days?/)){
     const due=list.filter(p=>followUpStatus(p).due);
     const lines=due.slice(0,15).map(p=>`• ${p.id} — ${p.name} (${p.client}) — ${followUpStatus(p).text}`).join("\n");
     return `Follow-ups (${due.length} due, ${list.length} matched):\n${lines}`;
@@ -282,7 +285,7 @@ function summarizeQuery(projects, query){
     return `Stalled / aging (${list.length}):\n${lines}`;
   }
 
-  if(lower.includes("highest value")||lower.includes("top value")||lower.includes("largest")||lower.includes("biggest")||lower.includes("highest total value")){
+  if(lower.includes("highest value")||lower.includes("top value")||lower.includes("largest")||lower.includes("biggest")){
     const top=[...list].sort((a,b)=>b.value-a.value).slice(0,5);
     const lines=top.map((p,i)=>`${i+1}. ${p.id} — ${p.name} (${p.client}) — ${currency(p.value)}`).join("\n");
     const maxLine=top[0]?`Highest: ${top[0].id} — ${currency(top[0].value)}`:"Highest: (none)";
@@ -312,7 +315,43 @@ function summarizeQuery(projects, query){
 }
 
 // =====================================
-// Blank demo data (no prebuilt projects/quotes)
+// Auto-cascade engine
+// =====================================
+// Compute a full set of dates based on an anchor phase/date and OFFSETS.
+// Returns a new milestones object.
+function computeCascade(anchorPhase, anchorISO){
+  const anchorOffset = OFFSETS[anchorPhase];
+  const baseDate = new Date(anchorISO);
+  baseDate.setHours(0,0,0,0);
+  const out = {};
+  for (const ph of PHASES){
+    const delta = OFFSETS[ph] - anchorOffset;
+    const d = new Date(baseDate);
+    d.setDate(d.getDate()+delta);
+    out[ph] = d.toISOString().slice(0,10);
+  }
+  return out;
+}
+// Make the timeline non-decreasing by phase (never out-of-order).
+function enforceNonDecreasing(m){
+  const copy = { ...m };
+  let last = null;
+  for (const ph of PHASES){
+    const cur = copy[ph] ? new Date(copy[ph]) : null;
+    if (!cur){ continue; }
+    cur.setHours(0,0,0,0);
+    if (last && cur.getTime() < last.getTime()){
+      // nudge forward to last (same day acceptable)
+      copy[ph] = new Date(last).toISOString().slice(0,10);
+    }
+    last = new Date(copy[ph]);
+    last.setHours(0,0,0,0);
+  }
+  return copy;
+}
+
+// =====================================
+// Blank data
 // =====================================
 const PROJECTS = [];   // start empty
 const QUOTES   = [];   // start empty
@@ -329,12 +368,12 @@ const CardContent = ({children,className=""}) => <div className={`px-5 pb-5 ${cl
 // Main App
 // =====================================
 function App(){
-  // load / persist (new key v8)
+  // load / persist (new key v9)
   const [projects,setProjects]=React.useState(()=>{
-    try{ const raw=localStorage.getItem("southwood_projects_v8"); return raw?JSON.parse(raw):PROJECTS; }catch{ return PROJECTS; }
+    try{ const raw=localStorage.getItem("southwood_projects_v9"); return raw?JSON.parse(raw):PROJECTS; }catch{ return PROJECTS; }
   });
   const [quotes]=React.useState(QUOTES);
-  React.useEffect(()=>{ try{ localStorage.setItem("southwood_projects_v8", JSON.stringify(projects)); }catch{} },[projects]);
+  React.useEffect(()=>{ try{ localStorage.setItem("southwood_projects_v9", JSON.stringify(projects)); }catch{} },[projects]);
 
   // tabs & filters
   const [tab,setTab]=React.useState("projects");
@@ -374,10 +413,15 @@ function App(){
   const [editMilestones,setEditMilestones]=React.useState({});
   const [editPhaseSince,setEditPhaseSince]=React.useState("");
   const [editLastContact,setEditLastContact]=React.useState("");
-  const [editCadence,setEditCadence]=React.useState("14");
+  const [editCadence,setEditCadence]=React.useState("14"); // label will say "Follow-up every (days)"
   const [editContactPerson,setEditContactPerson]=React.useState("");
   const [editContactEmail,setEditContactEmail]=React.useState("");
   const [editDone, setEditDone] = React.useState({}); // per-phase done dates
+
+  // auto-cascade controls
+  const [autoCascade, setAutoCascade] = React.useState(true);
+  const [lastEditedPhase, setLastEditedPhase] = React.useState(null);
+  const [touched, setTouched] = React.useState(new Set()); // phases user explicitly edited this session
 
   // quick add
   const [qaName,setQaName]=React.useState("");
@@ -400,7 +444,12 @@ function App(){
     const valueNum=Number(String(qaValue).replace(/,/g,""));
     if(!qaName||!qaClient||Number.isNaN(valueNum)){ setToast("Fill Project Name, Client, and a numeric Value."); setTimeout(()=>setToast(""),2000); return; }
     const base=todayStart();
-    const milestones={ Design:addDaysISO(base,7), Estimating:addDaysISO(base,14), Permitting:addDaysISO(base,28), Surveying:addDaysISO(base,35), Manufacturing:addDaysISO(base,60), Installing:addDaysISO(base,75) };
+    const milestones={};
+    // Seed relative to today using OFFSETS, but center around selected starting phase
+    const center = qaPhase;
+    const cascade = computeCascade(center, addDaysISO(base, OFFSETS[center]));
+    Object.assign(milestones, cascade);
+
     const newP={
       id: nextId(projects),
       name: qaName.trim(),
@@ -415,8 +464,8 @@ function App(){
       contactEmail: qaEmail.trim(),
       lastContact: null,
       cadenceDays: Number(qaCadence || "14"),
-      done: {},          // per-phase done dates
-      completedAt: null, // overall completion date
+      done: {},
+      completedAt: null,
     };
     setProjects(prev=>[newP,...prev]);
     setQaName(""); setQaClient(""); setQaLocation("Rock Hill, SC"); setQaValue(""); setQaPhase("Design"); setQaContact(""); setQaEmail(""); setQaCadence("14");
@@ -426,15 +475,19 @@ function App(){
   // Edit flow
   function startEdit(p){
     setEditId(p.id); setEditPhase(p.phase); setEditMilestones({...p.milestones}); setEditPhaseSince(p.phaseSince||"");
-    setEditLastContact(p.lastContact||""); setEditCadence(String(p.cadenceDays||14)); setEditContactPerson(p.contactPerson||""); setEditContactEmail(p.contactEmail||"");
+    setEditLastContact(p.lastContact||""); setEditCadence(String(p.cadenceDays||"14")); setEditContactPerson(p.contactPerson||""); setEditContactEmail(p.contactEmail||"");
     setEditDone({ ...(p.done || {}) });
+    setTouched(new Set());
+    setLastEditedPhase(null);
   }
   function saveEdit(){
     if(!editId) return;
+    // Final enforcement of non-decreasing order (keeps your manual changes but removes impossible sequences)
+    const sanitized = enforceNonDecreasing(editMilestones);
     setProjects(prev=>prev.map(p=> p.id===editId ? {
       ...p,
       phase: editPhase,
-      milestones: { ...editMilestones },
+      milestones: { ...sanitized },
       phaseSince: p.phase!==editPhase ? (editPhaseSince||todayStart().toISOString().slice(0,10)) : (editPhaseSince||p.phaseSince||todayStart().toISOString().slice(0,10)),
       lastContact: editLastContact || null,
       cadenceDays: Number(editCadence||"14"),
@@ -478,35 +531,50 @@ function App(){
     setProjects([]);
   }
 
-  // Completion actions (closures over setProjects)
-  function markPhaseDone(p, ph, dateISO = todayStart().toISOString().slice(0,10)) {
-    setProjects(prev => prev.map(x => {
-      if (x.id !== p.id) return x;
-      const updated = { ...x, done: { ...(x.done || {}), [ph]: dateISO } };
-      // Auto-advance (ask)
-      if (x.phase === ph && !x.completedAt) {
-        const nxt = nextPhase(ph);
-        if (nxt && confirm(`Move ${x.id} to next phase (${nxt})?`)) {
-          updated.phase = nxt;
-          updated.phaseSince = dateISO;
-        } else {
-          updated.phaseSince = dateISO;
-        }
-      }
-      if (ph === "Installing") updated.completedAt = dateISO;
-      return updated;
-    }));
-  }
-  function completeProject(p, dateISO = todayStart().toISOString().slice(0,10)) {
-    setProjects(prev => prev.map(x => x.id === p.id ? {
-      ...x,
-      done: { ...(x.done || {}), Installing: dateISO },
-      completedAt: dateISO
-    } : x));
-  }
-
   // AI
   function runAI(){ if(!aiQuery.trim()){ setAiAnswer("Type a question or pick a chip."); return; } setAiAnswer(summarizeQuery(projects, aiQuery)); }
+
+  // Auto-cascade handlers inside Edit
+  function onPhaseDateChange(ph, iso){
+    setTouched(prev => new Set(prev).add(ph));
+    setLastEditedPhase(ph);
+    setEditMilestones(curr=>{
+      let next = { ...curr, [ph]: iso };
+      if (autoCascade && iso){
+        const cascade = computeCascade(ph, iso);
+        // Only fill phases the user hasn't touched yet OR that are empty.
+        for (const p of PHASES){
+          if (p===ph) continue;
+          const untouched = !touched.has(p);
+          const empty = !next[p];
+          if (untouched && empty){
+            next[p] = cascade[p];
+          }
+        }
+        // Keep the sequence non-decreasing overall
+        next = enforceNonDecreasing(next);
+      }
+      return next;
+    });
+  }
+  function autoFillFromCurrent(){
+    if (!lastEditedPhase || !editMilestones[lastEditedPhase]) return;
+    const ph = lastEditedPhase;
+    const iso = editMilestones[ph];
+    setEditMilestones(curr=>{
+      let next = { ...curr };
+      const cascade = computeCascade(ph, iso);
+      for (const p of PHASES){
+        if (p===ph) continue;
+        // Fill anything not explicitly touched this session
+        if (!touched.has(p)){
+          next[p] = cascade[p];
+        }
+      }
+      next = enforceNonDecreasing(next);
+      return next;
+    });
+  }
 
   // Derived list
   const filtered=React.useMemo(()=>{
@@ -722,7 +790,6 @@ function App(){
                                       {next ? (
                                         <span>
                                           {next.phase} • {new Date(next.date).toLocaleDateString()} (<span className="text-zinc-400">{relLabel(next.date)}</span>)
-                                          {/* Show on-time of that phase when done */}
                                           {p.done?.[next.phase] && (
                                             <span className={`ml-2 text-xs ${isPhaseOnTime(p,next.phase) ? "text-emerald-300" : "text-rose-300"}`}>
                                               {isPhaseOnTime(p,next.phase) ? "On time" : "Late"}
@@ -744,20 +811,20 @@ function App(){
 
                                 <td className="py-3 px-3 whitespace-nowrap">
                                   <div className={`text-xs ${fup.class}`}>{fup.text}</div>
-                                  <div className="text-xs text-zinc-500">Last: {p.lastContact?new Date(p.lastContact).toLocaleDateString():"—"} • Cadence: {p.cadenceDays||14}d</div>
+                                  <div className="text-xs text-zinc-500">Last: {p.lastContact?new Date(p.lastContact).toLocaleDateString():"—"} • Follow-up every: {p.cadenceDays||14}d</div>
                                   {!p.completedAt && <button onClick={()=>addFollowUpICS(p)} className="mt-1 text-xs underline text-emerald-300 hover:text-emerald-200">Add reminder</button>}
                                 </td>
 
                                 <td className="py-3 px-3 text-right space-x-2">
-                                  {!p.completedAt && (
-                                    <>
-                                      <button onClick={()=>markPhaseDone(p, p.phase)} title="Stamp current phase as finished today (optionally advance)" className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Done Phase</button>
-                                      <button onClick={()=>completeProject(p)} title="Mark entire project as complete today" className="px-2.5 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-sm">Complete</button>
-                                    </>
-                                  )}
+                                  {/* simpler actions; no auto-advance */}
                                   <button onClick={()=>emailContact(p)} className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Email</button>
                                   <button onClick={()=>logContact(p)} className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Log</button>
-                                  <button onClick={()=>startEdit(p)} className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Edit</button>
+                                  <button onClick={()=>setEditId(p.id)||startEdit(p)} className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Edit</button>
+                                  {!p.completedAt && <button onClick={()=>{
+                                      // one-click complete (stamps Installing done)
+                                      const iso=todayStart().toISOString().slice(0,10);
+                                      setProjects(prev=>prev.map(x=>x.id===p.id?{...x, done:{...(x.done||{}), Installing: iso}, completedAt: iso}:x));
+                                    }} className="px-2.5 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-sm">Complete</button>}
                                   <button onClick={()=>deleteProject(p)} className="px-2.5 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-600 text-sm">Delete</button>
                                 </td>
                               </tr>
@@ -766,49 +833,72 @@ function App(){
                               {editId===p.id && (
                                 <tr className="bg-zinc-950/60 border-t border-zinc-900">
                                   <td colSpan={9} className="px-4 py-4">
+                                    <div className="flex items-center justify-between mb-3">
+                                      <div className="flex items-center gap-3">
+                                        <label className="inline-flex items-center gap-2 text-sm bg-zinc-900 border border-zinc-800 px-3 py-1.5 rounded-lg">
+                                          <input type="checkbox" checked={autoCascade} onChange={()=>setAutoCascade(v=>!v)} />
+                                          <span>Auto-cascade dates as I edit</span>
+                                        </label>
+                                        <button onClick={autoFillFromCurrent} className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm" title="Use the most recently edited phase as the anchor">Auto-fill from this phase</button>
+                                      </div>
+                                      <div className="text-xs text-zinc-400">{lastEditedPhase ? `Anchor: ${lastEditedPhase}` : "Set a date to establish an anchor"}</div>
+                                    </div>
+
                                     <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
                                       <div className="space-y-2">
                                         <label className="text-xs text-zinc-400">Current Phase</label>
                                         <select value={editPhase} onChange={(e)=>setEditPhase(e.target.value)} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm">
                                           {PHASES.map(ph=><option key={ph} value={ph}>{ph}</option>)}
                                         </select>
+                                        <label className="text-xs text-zinc-400 mt-3 block">Phase Since</label>
+                                        <input type="date" value={editPhaseSince} onChange={(e)=>setEditPhaseSince(e.target.value)} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
                                       </div>
+
                                       {PHASES.map(ph=>(
                                         <div key={ph} className="space-y-2">
                                           <label className="text-xs text-zinc-400">{ph} Due Date</label>
-                                          <input type="date" value={editMilestones[ph]||""} onChange={(e)=>setEditMilestones(m=>({ ...m, [ph]: e.target.value }))} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
+                                          <input
+                                            type="date"
+                                            value={editMilestones[ph]||""}
+                                            onChange={(e)=>onPhaseDateChange(ph, e.target.value)}
+                                            className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"
+                                          />
                                           <div className="flex items-center gap-2">
-                                            <label className="text-xs text-zinc-400 w-28">Done Date</label>
-                                            <input type="date" value={editDone[ph]||""} onChange={(e)=>setEditDone(d=>({ ...d, [ph]: e.target.value }))} className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
+                                            <label className="text-xs text-zinc-400 w-24">Done Date</label>
+                                            <input
+                                              type="date"
+                                              value={editDone[ph]||""}
+                                              onChange={(e)=>setEditDone(d=>({ ...d, [ph]: e.target.value }))}
+                                              className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"
+                                            />
+                                            <button
+                                              onClick={()=>setEditDone(d=>({ ...d, [ph]: todayStart().toISOString().slice(0,10) }))}
+                                              className="px-2 py-1 text-xs rounded bg-zinc-800 hover:bg-zinc-700"
+                                              title="Stamp today"
+                                            >
+                                              Today
+                                            </button>
                                           </div>
-                                          {editDone[ph] && (
+                                          {editDone[ph] && editMilestones[ph] && (
                                             <div className={`text-xs ${isPhaseOnTime({ milestones: editMilestones, done: editDone }, ph) ? "text-emerald-300" : "text-rose-300"}`}>
                                               {isPhaseOnTime({ milestones: editMilestones, done: editDone }, ph) ? "On time" : "Late"}
                                             </div>
                                           )}
                                         </div>
                                       ))}
-                                      <div className="space-y-2">
-                                        <label className="text-xs text-zinc-400">Phase Since</label>
-                                        <input type="date" value={editPhaseSince} onChange={(e)=>setEditPhaseSince(e.target.value)} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
-                                      </div>
+
                                       <div className="space-y-2">
                                         <label className="text-xs text-zinc-400">Last Contact</label>
                                         <input type="date" value={editLastContact} onChange={(e)=>setEditLastContact(e.target.value)} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
-                                      </div>
-                                      <div className="space-y-2">
-                                        <label className="text-xs text-zinc-400">Cadence (days)</label>
+                                        <label className="text-xs text-zinc-400">Follow-up every (days)</label>
                                         <input type="number" min="1" value={editCadence} onChange={(e)=>setEditCadence(e.target.value)} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
-                                      </div>
-                                      <div className="space-y-2">
                                         <label className="text-xs text-zinc-400">Contact Person</label>
                                         <input value={editContactPerson} onChange={(e)=>setEditContactPerson(e.target.value)} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
-                                      </div>
-                                      <div className="space-y-2">
                                         <label className="text-xs text-zinc-400">Contact Email</label>
                                         <input value={editContactEmail} onChange={(e)=>setEditContactEmail(e.target.value)} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
                                       </div>
                                     </div>
+
                                     <div className="flex items-center justify-end gap-2 mt-4">
                                       <button onClick={()=>setEditId(null)} className="px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Cancel</button>
                                       <button onClick={saveEdit} className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-medium">Save</button>
@@ -893,17 +983,17 @@ function App(){
                 <input value={qaEmail} onChange={(e)=>setQaEmail(e.target.value)} placeholder="Contact Email" className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
               </div>
               <div className="flex gap-2">
-                <input value={qaCadence} onChange={(e)=>setQaCadence(e.target.value)} placeholder="Cadence (days)" inputMode="numeric" className="w-40 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
+                <input value={qaCadence} onChange={(e)=>setQaCadence(e.target.value)} placeholder="Follow-up every (days)" inputMode="numeric" className="w-56 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
               </div>
               <button onClick={addProject} className="w-full bg-emerald-600 hover:bg-emerald-500 px-3 py-2 rounded-lg text-sm font-medium">Add Project</button>
-              <p className="text-xs text-zinc-400">New projects auto-seed milestones; set exact dates & done dates via <b>Edit</b>. Phase aging starts today.</p>
+              <p className="text-xs text-zinc-400">Milestones are auto-filled around the selected phase; adjust any dates as needed.</p>
             </CardContent>
           </Card>
         </aside>
       </main>
 
       <footer className="max-w-7xl mx-auto px-4 pb-10 text-xs text-zinc-500">
-        Blank start • Completion tracking • On-time/Late • Hide completed • Delete per row • ICS reminders • Risk tints • Click-to-sort • Inline value edit • AI chips • Aging & stalled • Follow-up tracking • Local persistence
+        Auto-cascade dates • Simple per-phase Done • Hide completed • Delete per row • ICS reminders • Risk tints • Sort • Inline value edit • AI chips • Aging & stalled • Follow-up tracking • Local persistence
       </footer>
 
       {toast && <div className="fixed bottom-4 right-4 bg-zinc-900 border border-zinc-700 text-sm px-3 py-2 rounded-lg">{toast}</div>}
