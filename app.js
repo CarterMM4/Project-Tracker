@@ -1,9 +1,10 @@
-// Southwood Project Tracker — Full, Blank Start + Delete
+// Southwood Project Tracker — Full + Completion Tracking (Blank Start)
 // Keeps: Risk Tints • Sort • Inline Value Edit • AI Chips/Queries • Aging/Stalled
 //        Contact tracking (lastContact, cadenceDays) • ICS reminders (milestone & follow-up)
-//        Edit panel (milestones, phaseSince, contacts) • KPIs • Local persistence
-// Adds:  Delete per row + Clear All button
-// Starts empty using localStorage key v7 (wipes away old sample view)
+//        Edit panel (milestones, phaseSince, contacts) • KPIs • Delete per row • Clear All
+// Adds:  Per-phase Done dates • Mark Phase Done (with optional auto-advance)
+//        Complete Project • On-time/Late flags • Hide Completed (default ON)
+// Storage key: v8 (fresh)
 
 // =====================================
 // Constants & helpers
@@ -80,17 +81,18 @@ const STALL_THRESHOLDS = { Design:14, Estimating:10, Permitting:21, Surveying:10
 
 function getNextUpcoming(project){
   const t0=todayStart().getTime(); const future=[];
-  for(const ph of PHASES){ const d=project.milestones[ph]; if(d){ const t=new Date(d).setHours(0,0,0,0); if(t>=t0) future.push({phase:ph,date:d}); } }
+  for(const ph of PHASES){ const d=project.milestones?.[ph]; if(d){ const t=new Date(d).setHours(0,0,0,0); if(t>=t0) future.push({phase:ph,date:d}); } }
   if(!future.length) return null;
   future.sort((a,b)=>new Date(a.date)-new Date(b.date));
   return future[0];
 }
 function overduePhases(project){
   const t0=todayStart().getTime();
-  return PHASES.filter(ph=>{ const d=project.milestones[ph]; return d? new Date(d).setHours(0,0,0,0) < t0 : false; });
+  return PHASES.filter(ph=>{ const d=project.milestones?.[ph]; return d? new Date(d).setHours(0,0,0,0) < t0 : false; });
 }
 const hasOverdue=(p)=>overduePhases(p).length>0;
 function riskTier(project){
+  if (project.completedAt) return { tier:"Done", row:"bg-zinc-900/40", badge:"bg-zinc-800 text-zinc-300 border border-zinc-700" };
   const overdue=overduePhases(project);
   if(overdue.length) return { tier:"Overdue", row:"bg-rose-950/40", badge:"bg-rose-600/15 text-rose-300 border border-rose-700" };
   const next=getNextUpcoming(project); if(!next) return { tier:"None", row:"bg-transparent", badge:"bg-zinc-800 text-zinc-300 border border-zinc-700" };
@@ -100,8 +102,9 @@ function riskTier(project){
   return { tier:"Low", row:"bg-emerald-950/20", badge:"bg-emerald-600/10 text-emerald-300 border border-emerald-700" };
 }
 const ageInCurrentPhase=(p)=>p.phaseSince?Math.max(0,daysSince(p.phaseSince)):null;
-const isStalled=(p)=>{ const age=ageInCurrentPhase(p); if(age===null) return false; const lim=STALL_THRESHOLDS[p.phase]??14; return age>lim; };
+const isStalled=(p)=>{ if(p.completedAt) return false; const age=ageInCurrentPhase(p); if(age===null) return false; const lim=STALL_THRESHOLDS[p.phase]??14; return age>lim; };
 function priorityScore(p){
+  if (p.completedAt) return -1e9; // push completed to the bottom
   const overdue=overduePhases(p);
   if(overdue.length){ const worst=Math.min(...overdue.map(ph=>daysUntil(p.milestones[ph]))); return 100000 + Math.abs(worst)*100 + p.value/1000; }
   const next=getNextUpcoming(p); const d=next?daysUntil(next.date):9999;
@@ -116,6 +119,7 @@ function nextFollowUpDate(p){
   const d=new Date(p.lastContact); d.setHours(0,0,0,0); d.setDate(d.getDate()+cadence); return d;
 }
 function followUpStatus(p){
+  if (p.completedAt) return { text:"Project complete", due:false, class:"text-zinc-400" };
   const cadence=Number(p.cadenceDays||14); const last=p.lastContact?new Date(p.lastContact):null; const next=nextFollowUpDate(p); const now=todayStart();
   if(!last) return { text:`No contact yet (cadence ${cadence}d)`, due:true, class:"text-rose-300" };
   if(next<=now){ const od=Math.abs(Math.min(0,daysUntil(next.toISOString().slice(0,10)))); return { text:`Follow-up due (${od}d overdue)`, due:true, class:"text-rose-300" }; }
@@ -132,6 +136,22 @@ function addFollowUpICS(p){
   const ics=makeICS({ summary:`${p.id} — ${p.name}: ${label}`, description:`Cadence ${p.cadenceDays||14}d • Contact ${p.contactPerson||""} ${p.contactEmail||""}`, dateISO });
   downloadTextFile(`${p.id}-follow-up.ics`, ics, "text/calendar");
 }
+
+// =====================================
+// Completion helpers
+// =====================================
+function isPhaseOnTime(p, ph) {
+  const doneAt = p?.done?.[ph];
+  const due = p?.milestones?.[ph];
+  if (!doneAt || !due) return null; // unknown
+  return new Date(doneAt).setHours(0,0,0,0) <= new Date(due).setHours(0,0,0,0);
+}
+function nextPhase(ph){
+  const idx = PHASES.indexOf(ph);
+  return idx>=0 && idx<PHASES.length-1 ? PHASES[idx+1] : null;
+}
+
+// These two rely on setProjects in component scope; we wrap them inside component later as closures.
 
 // =====================================
 // “AI” query parsing
@@ -154,10 +174,22 @@ function extractDateRange(q){
   if(m){ const d=tryParseDate(m[0]); if(d) return {start:d,end:new Date(d.getTime()+86400000)}; }
   return null;
 }
+
 function applyAIQuery(projects, query){
   if(!String(query).trim()) return projects;
   let list=[...projects];
   const lower=String(query).toLowerCase();
+
+  // completed / not completed filters
+  if (includesWord(lower,"completed on time")) {
+    list = list.filter(p => p.completedAt && (!p.milestones?.Installing || new Date(p.completedAt) <= new Date(p.milestones.Installing)));
+  } else if (includesWord(lower,"completed late")) {
+    list = list.filter(p => p.completedAt && (p.milestones?.Installing && new Date(p.completedAt) > new Date(p.milestones.Installing)));
+  } else if (includesWord(lower,"completed")) {
+    list = list.filter(p => p.completedAt);
+  } else if (includesWord(lower,"not completed") || includesWord(lower,"active only")) {
+    list = list.filter(p => !p.completedAt);
+  }
 
   // value over/under
   const over=readAmountAfter(query,"over"); if(over!==null) list=list.filter(p=>p.value>over);
@@ -165,13 +197,13 @@ function applyAIQuery(projects, query){
 
   // phase mentions
   const mentioned=PHASES.filter(ph=>includesWord(lower, ph.toLowerCase()));
-  if(mentioned.length) list=list.filter(p=>mentioned.some(ph=>p.milestones[ph]||p.phase===ph));
+  if(mentioned.length) list=list.filter(p=>mentioned.some(ph=>p.milestones?.[ph] || p.phase===ph));
 
   // overdue keyword (optionally scoped)
   if(includesWord(lower,"overdue")){
     list=list.filter(p=>{
       if(!mentioned.length) return hasOverdue(p);
-      return mentioned.some(ph=>{ const d=p.milestones[ph]; return d? new Date(d).setHours(0,0,0,0) < todayStart().getTime() : false; });
+      return mentioned.some(ph=>{ const d=p.milestones?.[ph]; return d? new Date(d).setHours(0,0,0,0) < todayStart().getTime() : false; });
     });
   }
 
@@ -182,7 +214,7 @@ function applyAIQuery(projects, query){
     const end=range.end?range.end.getTime():Infinity;
     list=list.filter(p=>{
       const phases=mentioned.length?mentioned:PHASES;
-      return phases.some(ph=>{ const d=p.milestones[ph]; if(!d) return false; const t=new Date(d).setHours(0,0,0,0); return t>=start && t<=end; });
+      return phases.some(ph=>{ const d=p.milestones?.[ph]; if(!d) return false; const t=new Date(d).setHours(0,0,0,0); return t>=start && t<=end; });
     });
   }
 
@@ -192,7 +224,7 @@ function applyAIQuery(projects, query){
   // focus intent
   if(includesWord(lower,"focus")||includesWord(lower,"right away")||includesWord(lower,"urgent")){
     const soon=todayStart().getTime()+7*86400000;
-    list=list.filter(p=> hasOverdue(p) || (getNextUpcoming(p)&&new Date(getNextUpcoming(p).date).getTime()<=soon) );
+    list=list.filter(p=> !p.completedAt && (hasOverdue(p) || (getNextUpcoming(p)&&new Date(getNextUpcoming(p).date).getTime()<=soon)) );
     list.sort((a,b)=>priorityScore(b)-priorityScore(a));
   }
 
@@ -202,8 +234,8 @@ function applyAIQuery(projects, query){
   if(olderMatch){ const n=Number(olderMatch[1]); list=list.filter(p=>{ const age=ageInCurrentPhase(p); return age!==null && age>n; }); }
 
   // follow-ups
-  if(includesWord(lower,"follow-ups due")||includesWord(lower,"overdue follow-ups")||includesWord(lower,"follow up due")) list=list.filter(p=>followUpStatus(p).due);
-  const notContacted=lower.match(/not contacted in (\d+)\s*days?/); if(notContacted){ const n=Number(notContacted[1]); list=list.filter(p=>!p.lastContact || daysSince(p.lastContact)>=n); }
+  if(includesWord(lower,"follow-ups due")||includesWord(lower,"overdue follow-ups")||includesWord(lower,"follow up due")) list=list.filter(p=>!p.completedAt && followUpStatus(p).due);
+  const notContacted=lower.match(/not contacted in (\d+)\s*days?/); if(notContacted){ const n=Number(notContacted[1]); list=list.filter(p=>!p.completedAt && (!p.lastContact || daysSince(p.lastContact)>=n)); }
   if(includesWord(lower,"contacted today")) list=list.filter(p=>p.lastContact && daysSince(p.lastContact)===0);
   if(includesWord(lower,"contacted this week")){
     const now=todayStart(); const day=now.getDay(); const monday=new Date(now); monday.setDate(now.getDate()-((day+6)%7));
@@ -212,10 +244,20 @@ function applyAIQuery(projects, query){
 
   return list;
 }
+
 function summarizeQuery(projects, query){
   const list=applyAIQuery(projects, query);
   const count=list.length; const total=list.reduce((s,p)=>s+p.value,0);
   const lower=String(query).toLowerCase(); const wantsList=lower.includes("which")||lower.includes("list")||lower.includes("show");
+
+  if(lower.includes("completed")){
+    const lines=list.slice(0,15).map(p=>{
+      const ot = p.milestones?.Installing ? (new Date(p.completedAt) <= new Date(p.milestones.Installing)) : null;
+      const tag = ot===null ? "" : ot ? "On time" : "Late";
+      return `• ${p.id} — ${p.name} — completed ${new Date(p.completedAt).toLocaleDateString()} ${tag?`(${tag})`:""}`;
+    }).join("\n");
+    return `Completed (${count}):\n${lines}`;
+  }
 
   if(lower.includes("focus")||lower.includes("right away")||lower.includes("urgent")){
     const lines=list.slice(0,12).map(p=>{
@@ -272,8 +314,8 @@ function summarizeQuery(projects, query){
 // =====================================
 // Blank demo data (no prebuilt projects/quotes)
 // =====================================
-const PROJECTS = [];   // <— starts empty
-const QUOTES   = [];   // keep empty; you can add later if you want
+const PROJECTS = [];   // start empty
+const QUOTES   = [];   // start empty
 
 // =====================================
 // UI primitives
@@ -287,18 +329,19 @@ const CardContent = ({children,className=""}) => <div className={`px-5 pb-5 ${cl
 // Main App
 // =====================================
 function App(){
-  // load / persist (new key v7)
+  // load / persist (new key v8)
   const [projects,setProjects]=React.useState(()=>{
-    try{ const raw=localStorage.getItem("southwood_projects_v7"); return raw?JSON.parse(raw):PROJECTS; }catch{ return PROJECTS; }
+    try{ const raw=localStorage.getItem("southwood_projects_v8"); return raw?JSON.parse(raw):PROJECTS; }catch{ return PROJECTS; }
   });
   const [quotes]=React.useState(QUOTES);
-  React.useEffect(()=>{ try{ localStorage.setItem("southwood_projects_v7", JSON.stringify(projects)); }catch{} },[projects]);
+  React.useEffect(()=>{ try{ localStorage.setItem("southwood_projects_v8", JSON.stringify(projects)); }catch{} },[projects]);
 
   // tabs & filters
   const [tab,setTab]=React.useState("projects");
   const [search,setSearch]=React.useState("");
   const [phasesFilter,setPhasesFilter]=React.useState([...PHASES]);
   const [minVal,setMinVal]=React.useState(""); const [maxVal,setMaxVal]=React.useState("");
+  const [hideCompleted, setHideCompleted] = React.useState(true);
 
   // AI
   const [aiQuery,setAiQuery]=React.useState("");
@@ -313,6 +356,9 @@ function App(){
     "follow-ups due",
     "not contacted in 14 days",
     "contacted this week",
+    "completed",
+    "completed on time",
+    "completed late",
   ];
 
   // sorting
@@ -331,6 +377,7 @@ function App(){
   const [editCadence,setEditCadence]=React.useState("14");
   const [editContactPerson,setEditContactPerson]=React.useState("");
   const [editContactEmail,setEditContactEmail]=React.useState("");
+  const [editDone, setEditDone] = React.useState({}); // per-phase done dates
 
   // quick add
   const [qaName,setQaName]=React.useState("");
@@ -346,7 +393,7 @@ function App(){
 
   // utils
   const togglePhaseFilter=(ph)=>setPhasesFilter(prev=>prev.includes(ph)?prev.filter(x=>x!==ph):[...prev,ph]);
-  function runClear(){ setPhasesFilter([...PHASES]); setMinVal(""); setMaxVal(""); setAiQuery(""); setAiAnswer(""); setSearch(""); setSortKey("priority"); setSortDir("desc"); }
+  function runClear(){ setPhasesFilter([...PHASES]); setMinVal(""); setMaxVal(""); setAiQuery(""); setAiAnswer(""); setSearch(""); setSortKey("priority"); setSortDir("desc"); setHideCompleted(true); }
 
   // Add project
   function addProject(){
@@ -368,6 +415,8 @@ function App(){
       contactEmail: qaEmail.trim(),
       lastContact: null,
       cadenceDays: Number(qaCadence || "14"),
+      done: {},          // per-phase done dates
+      completedAt: null, // overall completion date
     };
     setProjects(prev=>[newP,...prev]);
     setQaName(""); setQaClient(""); setQaLocation("Rock Hill, SC"); setQaValue(""); setQaPhase("Design"); setQaContact(""); setQaEmail(""); setQaCadence("14");
@@ -378,6 +427,7 @@ function App(){
   function startEdit(p){
     setEditId(p.id); setEditPhase(p.phase); setEditMilestones({...p.milestones}); setEditPhaseSince(p.phaseSince||"");
     setEditLastContact(p.lastContact||""); setEditCadence(String(p.cadenceDays||14)); setEditContactPerson(p.contactPerson||""); setEditContactEmail(p.contactEmail||"");
+    setEditDone({ ...(p.done || {}) });
   }
   function saveEdit(){
     if(!editId) return;
@@ -390,6 +440,8 @@ function App(){
       cadenceDays: Number(editCadence||"14"),
       contactPerson: editContactPerson.trim(),
       contactEmail: editContactEmail.trim(),
+      done: { ...(p.done || {}), ...editDone },
+      ...(editDone?.Installing ? { completedAt: editDone.Installing } : {})
     } : p));
     setEditId(null);
   }
@@ -426,6 +478,33 @@ function App(){
     setProjects([]);
   }
 
+  // Completion actions (closures over setProjects)
+  function markPhaseDone(p, ph, dateISO = todayStart().toISOString().slice(0,10)) {
+    setProjects(prev => prev.map(x => {
+      if (x.id !== p.id) return x;
+      const updated = { ...x, done: { ...(x.done || {}), [ph]: dateISO } };
+      // Auto-advance (ask)
+      if (x.phase === ph && !x.completedAt) {
+        const nxt = nextPhase(ph);
+        if (nxt && confirm(`Move ${x.id} to next phase (${nxt})?`)) {
+          updated.phase = nxt;
+          updated.phaseSince = dateISO;
+        } else {
+          updated.phaseSince = dateISO;
+        }
+      }
+      if (ph === "Installing") updated.completedAt = dateISO;
+      return updated;
+    }));
+  }
+  function completeProject(p, dateISO = todayStart().toISOString().slice(0,10)) {
+    setProjects(prev => prev.map(x => x.id === p.id ? {
+      ...x,
+      done: { ...(x.done || {}), Installing: dateISO },
+      completedAt: dateISO
+    } : x));
+  }
+
   // AI
   function runAI(){ if(!aiQuery.trim()){ setAiAnswer("Type a question or pick a chip."); return; } setAiAnswer(summarizeQuery(projects, aiQuery)); }
 
@@ -434,6 +513,7 @@ function App(){
     let list=projects.filter(p=>phasesFilter.includes(p.phase));
     if(minVal) list=list.filter(p=>p.value>=Number(minVal));
     if(maxVal) list=list.filter(p=>p.value<=Number(maxVal));
+    if(hideCompleted) list=list.filter(p=>!p.completedAt);
     if(search.trim()){ const s=search.toLowerCase(); list=list.filter(p=>[p.id,p.name,p.client,p.location,p.contactPerson,p.contactEmail].some(x=>String(x||"").toLowerCase().includes(s))); }
     if(aiQuery.trim()) list=applyAIQuery(list, aiQuery);
 
@@ -453,20 +533,22 @@ function App(){
       return (sortDir==="asc"?cmpAsc:cmpDesc)(a,b);
     });
     return list;
-  },[projects,phasesFilter,minVal,maxVal,search,aiQuery,sortKey,sortDir]);
+  },[projects,phasesFilter,minVal,maxVal,search,aiQuery,sortKey,sortDir,hideCompleted]);
 
-  // KPIs
+  // KPIs (exclude completed)
   const kpi=React.useMemo(()=>{
+    const activeList = projects.filter(p=>!p.completedAt);
     const now=todayStart().getTime(); const in30=now+30*86400000;
-    const dueSoon=projects.filter(p=>PHASES.some(ph=>{ const d=p.milestones[ph]; if(!d) return false; const t=new Date(d).getTime(); return t>=now && t<=in30; })).length;
-    const atRisk=projects.filter(p=>hasOverdue(p)).length;
-    const totalValue=projects.reduce((s,p)=>s+p.value,0);
+    const dueSoon=activeList.filter(p=>PHASES.some(ph=>{ const d=p.milestones?.[ph]; if(!d) return false; const t=new Date(d).getTime(); return t>=now && t<=in30; })).length;
+    const atRisk=activeList.filter(p=>hasOverdue(p)).length;
+    const totalValue=activeList.reduce((s,p)=>s+p.value,0);
     const pipeline=quotes.reduce((acc,q)=>acc+q.amount*q.probability,0);
-    const ages=projects.map(p=>ageInCurrentPhase(p)).filter(x=>x!==null);
+    const ages=activeList.map(p=>ageInCurrentPhase(p)).filter(x=>x!==null);
     const avgAge=ages.length?Math.round(ages.reduce((a,b)=>a+b,0)/ages.length):0;
-    const stalled=projects.filter(p=>isStalled(p)).length;
-    const followDue=projects.filter(p=>followUpStatus(p).due).length;
-    return { active:projects.length, pipeline, dueSoon, atRisk, totalValue, avgAge, stalled, followDue };
+    const stalled=activeList.filter(p=>isStalled(p)).length;
+    const followDue=activeList.filter(p=>followUpStatus(p).due).length;
+    const completedCount = projects.length - activeList.length;
+    return { active:activeList.length, pipeline, dueSoon, atRisk, totalValue, avgAge, stalled, followDue, completedCount };
   },[projects,quotes]);
 
   // header sort UI
@@ -506,6 +588,10 @@ function App(){
               <option value="next">Sort: Next Due</option>
               <option value="age">Sort: Age</option>
             </select>
+            <label className="inline-flex items-center gap-2 bg-zinc-900 border border-zinc-800 px-3 py-2 rounded-lg text-sm">
+              <input type="checkbox" checked={hideCompleted} onChange={()=>setHideCompleted(v=>!v)} />
+              <span>Hide completed</span>
+            </label>
             <button onClick={runClear} className="px-3 py-2 rounded-lg bg-zinc-800 text-sm hover:bg-zinc-700">Reset</button>
             <button onClick={clearAll} className="px-3 py-2 rounded-lg bg-rose-700 hover:bg-rose-600 text-sm">Clear All Projects</button>
           </div>
@@ -518,10 +604,10 @@ function App(){
         <section className="lg:col-span-2 space-y-6">
           {/* KPIs */}
           <div className="grid sm:grid-cols-2 xl:grid-cols-5 gap-4">
-            <Card><CardContent className="p-5"><p className="text-xs uppercase tracking-widest text-zinc-400">Projects</p><p className="text-3xl mt-2 font-semibold">{kpi.active}</p><p className="text-xs text-zinc-400 mt-1">Total value {currency(kpi.totalValue)}</p></CardContent></Card>
+            <Card><CardContent className="p-5"><p className="text-xs uppercase tracking-widest text-zinc-400">Active Projects</p><p className="text-3xl mt-2 font-semibold">{kpi.active}</p><p className="text-xs text-zinc-400 mt-1">Completed hidden by default (Done: {kpi.completedCount})</p></CardContent></Card>
             <Card><CardContent className="p-5"><p className="text-xs uppercase tracking-widest text-zinc-400">Pipeline (Weighted)</p><p className="text-3xl mt-2 font-semibold">{currency(kpi.pipeline)}</p><p className="text-xs text-zinc-400 mt-1">Quotes × probability</p></CardContent></Card>
             <Card><CardContent className="p-5"><p className="text-xs uppercase tracking-widest text-zinc-400">Milestones due ≤30d</p><p className="text-3xl mt-2 font-semibold">{kpi.dueSoon}</p><p className="text-xs text-zinc-400 mt-1">Across all phases</p></CardContent></Card>
-            <Card><CardContent className="p-5"><p className="text-xs uppercase tracking-widest text-zinc-400">Overdue</p><p className="text-3xl mt-2 font-semibold">{kpi.atRisk}</p><p className="text-xs text-zinc-400 mt-1">Projects with any overdue phase</p></CardContent></Card>
+            <Card><CardContent className="p-5"><p className="text-xs uppercase tracking-widest text-zinc-400">Overdue</p><p className="text-3xl mt-2 font-semibold">{kpi.atRisk}</p><p className="text-xs text-zinc-400 mt-1">Any overdue phase</p></CardContent></Card>
             <Card><CardContent className="p-5"><p className="text-xs uppercase tracking-widest text-zinc-400">Avg Days in Phase</p><p className="text-3xl mt-2 font-semibold">{kpi.avgAge}</p><p className="text-xs text-zinc-400 mt-1">Stalled: {kpi.stalled} • Follow-ups Due: {kpi.followDue}</p></CardContent></Card>
           </div>
 
@@ -557,7 +643,7 @@ function App(){
                   {/* AI */}
                   <div className="space-y-2">
                     <div className="flex items-center gap-2">
-                      <input value={aiQuery} onChange={(e)=>setAiQuery(e.target.value)} onKeyDown={(e)=>{ if(e.key==="Enter") runAI(); }} placeholder="Try: follow-ups due, not contacted in 14 days, contacted this week, stalled, in phase over 14 days, due next 7 days, highest value projects" className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm" />
+                      <input value={aiQuery} onChange={(e)=>setAiQuery(e.target.value)} onKeyDown={(e)=>{ if(e.key==="Enter") runAI(); }} placeholder="Try: completed on time • completed late • follow-ups due • stalled • in phase over 14 days • due next 7 days • highest value projects" className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm" />
                       <button onClick={runAI} className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm">Ask</button>
                       <button onClick={()=>{ setAiQuery(""); setAiAnswer(""); }} className="px-3 py-2 rounded-lg bg-zinc-800 text-sm">Clear</button>
                     </div>
@@ -579,7 +665,7 @@ function App(){
                           <th className="text-left py-3 px-3">{headerSort("Client","client")}</th>
                           <th className="text-left py-3 px-3">{headerSort("Value","value")}</th>
                           <th className="text-left py-3 px-3">{headerSort("Phase","phase")}</th>
-                          <th className="text-left py-3 px-3">{headerSort("Next Due","next")}</th>
+                          <th className="text-left py-3 px-3">{headerSort("Next / Status","next")}</th>
                           <th className="text-left py-3 px-3">{headerSort("Age (days)","age")}</th>
                           <th className="text-left py-3 px-3">Risk</th>
                           <th className="text-left py-3 px-3">Follow-up</th>
@@ -620,14 +706,34 @@ function App(){
 
                                 <td className="py-3 px-3"><span className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-white text-xs ${phaseColor[p.phase]}`}>{p.phase}</span></td>
 
+                                {/* Next / Status */}
                                 <td className="py-3 px-3 whitespace-nowrap">
-                                  {next ? (
+                                  {p.completedAt ? (
                                     <span>
-                                      {next.phase} • {new Date(next.date).toLocaleDateString()} (<span className="text-zinc-400">{relLabel(next.date)}</span>)
-                                      <button onClick={()=>addMilestoneICS(p)} className="ml-2 text-xs underline text-emerald-300 hover:text-emerald-200">Add to calendar</button>
+                                      <span className="font-medium">Completed</span> • {new Date(p.completedAt).toLocaleDateString()}
+                                      {p.milestones?.Installing && (
+                                        <span className={`ml-2 text-xs ${new Date(p.completedAt) <= new Date(p.milestones.Installing) ? "text-emerald-300" : "text-rose-300"}`}>
+                                          {new Date(p.completedAt) <= new Date(p.milestones.Installing) ? "On time" : "Late"}
+                                        </span>
+                                      )}
                                     </span>
-                                  ) : (<span className="text-zinc-400">No upcoming</span>)}
-                                  {overdue.length>0 && <span className="block text-xs text-rose-400">Overdue: {overdue.join(", ")}</span>}
+                                  ) : (
+                                    <>
+                                      {next ? (
+                                        <span>
+                                          {next.phase} • {new Date(next.date).toLocaleDateString()} (<span className="text-zinc-400">{relLabel(next.date)}</span>)
+                                          {/* Show on-time of that phase when done */}
+                                          {p.done?.[next.phase] && (
+                                            <span className={`ml-2 text-xs ${isPhaseOnTime(p,next.phase) ? "text-emerald-300" : "text-rose-300"}`}>
+                                              {isPhaseOnTime(p,next.phase) ? "On time" : "Late"}
+                                            </span>
+                                          )}
+                                          <button onClick={()=>addMilestoneICS(p)} className="ml-2 text-xs underline text-emerald-300 hover:text-emerald-200">Add to calendar</button>
+                                        </span>
+                                      ) : (<span className="text-zinc-400">No upcoming</span>)}
+                                      {overdue.length>0 && <span className="block text-xs text-rose-400">Overdue: {overdue.join(", ")}</span>}
+                                    </>
+                                  )}
                                 </td>
 
                                 <td className="py-3 px-3">
@@ -639,10 +745,16 @@ function App(){
                                 <td className="py-3 px-3 whitespace-nowrap">
                                   <div className={`text-xs ${fup.class}`}>{fup.text}</div>
                                   <div className="text-xs text-zinc-500">Last: {p.lastContact?new Date(p.lastContact).toLocaleDateString():"—"} • Cadence: {p.cadenceDays||14}d</div>
-                                  <button onClick={()=>addFollowUpICS(p)} className="mt-1 text-xs underline text-emerald-300 hover:text-emerald-200">Add reminder</button>
+                                  {!p.completedAt && <button onClick={()=>addFollowUpICS(p)} className="mt-1 text-xs underline text-emerald-300 hover:text-emerald-200">Add reminder</button>}
                                 </td>
 
                                 <td className="py-3 px-3 text-right space-x-2">
+                                  {!p.completedAt && (
+                                    <>
+                                      <button onClick={()=>markPhaseDone(p, p.phase)} title="Stamp current phase as finished today (optionally advance)" className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Done Phase</button>
+                                      <button onClick={()=>completeProject(p)} title="Mark entire project as complete today" className="px-2.5 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-sm">Complete</button>
+                                    </>
+                                  )}
                                   <button onClick={()=>emailContact(p)} className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Email</button>
                                   <button onClick={()=>logContact(p)} className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Log</button>
                                   <button onClick={()=>startEdit(p)} className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Edit</button>
@@ -665,6 +777,15 @@ function App(){
                                         <div key={ph} className="space-y-2">
                                           <label className="text-xs text-zinc-400">{ph} Due Date</label>
                                           <input type="date" value={editMilestones[ph]||""} onChange={(e)=>setEditMilestones(m=>({ ...m, [ph]: e.target.value }))} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
+                                          <div className="flex items-center gap-2">
+                                            <label className="text-xs text-zinc-400 w-28">Done Date</label>
+                                            <input type="date" value={editDone[ph]||""} onChange={(e)=>setEditDone(d=>({ ...d, [ph]: e.target.value }))} className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
+                                          </div>
+                                          {editDone[ph] && (
+                                            <div className={`text-xs ${isPhaseOnTime({ milestones: editMilestones, done: editDone }, ph) ? "text-emerald-300" : "text-rose-300"}`}>
+                                              {isPhaseOnTime({ milestones: editMilestones, done: editDone }, ph) ? "On time" : "Late"}
+                                            </div>
+                                          )}
                                         </div>
                                       ))}
                                       <div className="space-y-2">
@@ -731,13 +852,11 @@ function App(){
               <div className="text-sm text-zinc-300">
                 Ask anything — it filters the table and summarizes:
                 <ul className="list-disc pl-5 mt-2 space-y-1">
-                  <li>follow-ups due</li>
-                  <li>not contacted in 14 days</li>
-                  <li>contacted this week</li>
+                  <li>completed / completed on time / completed late</li>
+                  <li>follow-ups due / not contacted in 14 days / contacted this week</li>
                   <li>what should I focus on</li>
                   <li>which projects are overdue</li>
-                  <li>stalled</li>
-                  <li>in phase over 14 days</li>
+                  <li>stalled / in phase over 14 days</li>
                   <li>due next 7 days</li>
                   <li>highest value projects</li>
                 </ul>
@@ -777,14 +896,14 @@ function App(){
                 <input value={qaCadence} onChange={(e)=>setQaCadence(e.target.value)} placeholder="Cadence (days)" inputMode="numeric" className="w-40 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
               </div>
               <button onClick={addProject} className="w-full bg-emerald-600 hover:bg-emerald-500 px-3 py-2 rounded-lg text-sm font-medium">Add Project</button>
-              <p className="text-xs text-zinc-400">New projects auto-seed milestones; set exact dates via <b>Edit</b>. Phase aging starts today.</p>
+              <p className="text-xs text-zinc-400">New projects auto-seed milestones; set exact dates & done dates via <b>Edit</b>. Phase aging starts today.</p>
             </CardContent>
           </Card>
         </aside>
       </main>
 
       <footer className="max-w-7xl mx-auto px-4 pb-10 text-xs text-zinc-500">
-        Blank start • Delete per row • ICS reminders • Risk tints • Click-to-sort • Inline value edit • AI chips • Aging & stalled • Follow-up tracking • Local persistence
+        Blank start • Completion tracking • On-time/Late • Hide completed • Delete per row • ICS reminders • Risk tints • Click-to-sort • Inline value edit • AI chips • Aging & stalled • Follow-up tracking • Local persistence
       </footer>
 
       {toast && <div className="fixed bottom-4 right-4 bg-zinc-900 border border-zinc-700 text-sm px-3 py-2 rounded-lg">{toast}</div>}
