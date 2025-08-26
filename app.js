@@ -1,17 +1,19 @@
-// Southwood Project Tracker — v9
-// Adds: Auto-cascade dates • Simple per-phase "Done Date" (with Today button)
-// Keeps: Risk tints • Sort • Inline value edit • AI queries • Aging/Stalled
-//        Follow-ups (Last Contact + Follow-up every days) • ICS reminders
-//        KPIs • Delete • Clear All • Blank start
-// Storage key: southwood_projects_v9
+// Southwood Project Tracker — v10 (fixed cascade + follow-up)
+// - Auto-cascade now overwrites untouched phases when any phase date changes
+// - "Re-sequence all" button reseeds all phases from the last edited anchor
+// - Follow-up preview updates correctly; saving reflects status right away
+// - Simple per-phase Done Date (with Today button)
+// - Keeps: AI queries, risk tints, sort, inline value edit, ICS, KPIs, delete, clear-all, blank start
+// Storage key: southwood_projects_v10
 
 // =====================================
 // Constants & helpers
 // =====================================
 const PHASES = ["Design","Estimating","Permitting","Surveying","Manufacturing","Installing"];
+const MONTHS = ["january","february","march","april","may","june","july","august","september","october","november","december"];
 
-// Timeline shape (relative offsets in days from a base)
-// Used for auto-seeding & cascading around an anchor phase/date.
+// Relative offsets (days) from a Design-based plan.
+// We also use these to cascade from any anchor phase by shifting all phases.
 const OFFSETS = {
   Design: 0,
   Estimating: 7,
@@ -29,8 +31,6 @@ const phaseColor = {
   Manufacturing: "bg-fuchsia-600",
   Installing: "bg-emerald-600",
 };
-
-const MONTHS = ["january","february","march","april","may","june","july","august","september","october","november","december"];
 
 const currency = (n) => Number(n).toLocaleString(undefined,{style:"currency",currency:"USD",maximumFractionDigits:0});
 function todayStart(){ const t=new Date(); t.setHours(0,0,0,0); return t; }
@@ -159,7 +159,7 @@ function isPhaseOnTime(p, ph) {
 }
 
 // =====================================
-// AI parsing (same as v8 + completed filters)
+// AI parsing
 // =====================================
 function extractDateRange(q){
   const lower=String(q).toLowerCase(); const now=todayStart();
@@ -318,21 +318,19 @@ function summarizeQuery(projects, query){
 // Auto-cascade engine
 // =====================================
 // Compute a full set of dates based on an anchor phase/date and OFFSETS.
-// Returns a new milestones object.
 function computeCascade(anchorPhase, anchorISO){
   const anchorOffset = OFFSETS[anchorPhase];
-  const baseDate = new Date(anchorISO);
-  baseDate.setHours(0,0,0,0);
+  const base = new Date(anchorISO); base.setHours(0,0,0,0);
   const out = {};
   for (const ph of PHASES){
     const delta = OFFSETS[ph] - anchorOffset;
-    const d = new Date(baseDate);
+    const d = new Date(base);
     d.setDate(d.getDate()+delta);
     out[ph] = d.toISOString().slice(0,10);
   }
   return out;
 }
-// Make the timeline non-decreasing by phase (never out-of-order).
+// Ensure dates are non-decreasing by phase order.
 function enforceNonDecreasing(m){
   const copy = { ...m };
   let last = null;
@@ -341,11 +339,9 @@ function enforceNonDecreasing(m){
     if (!cur){ continue; }
     cur.setHours(0,0,0,0);
     if (last && cur.getTime() < last.getTime()){
-      // nudge forward to last (same day acceptable)
       copy[ph] = new Date(last).toISOString().slice(0,10);
     }
-    last = new Date(copy[ph]);
-    last.setHours(0,0,0,0);
+    last = new Date(copy[ph]); last.setHours(0,0,0,0);
   }
   return copy;
 }
@@ -368,12 +364,12 @@ const CardContent = ({children,className=""}) => <div className={`px-5 pb-5 ${cl
 // Main App
 // =====================================
 function App(){
-  // load / persist (new key v9)
+  // load / persist (new key v10)
   const [projects,setProjects]=React.useState(()=>{
-    try{ const raw=localStorage.getItem("southwood_projects_v9"); return raw?JSON.parse(raw):PROJECTS; }catch{ return PROJECTS; }
+    try{ const raw=localStorage.getItem("southwood_projects_v10"); return raw?JSON.parse(raw):PROJECTS; }catch{ return PROJECTS; }
   });
   const [quotes]=React.useState(QUOTES);
-  React.useEffect(()=>{ try{ localStorage.setItem("southwood_projects_v9", JSON.stringify(projects)); }catch{} },[projects]);
+  React.useEffect(()=>{ try{ localStorage.setItem("southwood_projects_v10", JSON.stringify(projects)); }catch{} },[projects]);
 
   // tabs & filters
   const [tab,setTab]=React.useState("projects");
@@ -413,7 +409,7 @@ function App(){
   const [editMilestones,setEditMilestones]=React.useState({});
   const [editPhaseSince,setEditPhaseSince]=React.useState("");
   const [editLastContact,setEditLastContact]=React.useState("");
-  const [editCadence,setEditCadence]=React.useState("14"); // label will say "Follow-up every (days)"
+  const [editCadence,setEditCadence]=React.useState("14"); // "Follow-up every (days)"
   const [editContactPerson,setEditContactPerson]=React.useState("");
   const [editContactEmail,setEditContactEmail]=React.useState("");
   const [editDone, setEditDone] = React.useState({}); // per-phase done dates
@@ -421,7 +417,7 @@ function App(){
   // auto-cascade controls
   const [autoCascade, setAutoCascade] = React.useState(true);
   const [lastEditedPhase, setLastEditedPhase] = React.useState(null);
-  const [touched, setTouched] = React.useState(new Set()); // phases user explicitly edited this session
+  const [touched, setTouched] = React.useState(new Set()); // phases user edited this session
 
   // quick add
   const [qaName,setQaName]=React.useState("");
@@ -439,17 +435,13 @@ function App(){
   const togglePhaseFilter=(ph)=>setPhasesFilter(prev=>prev.includes(ph)?prev.filter(x=>x!==ph):[...prev,ph]);
   function runClear(){ setPhasesFilter([...PHASES]); setMinVal(""); setMaxVal(""); setAiQuery(""); setAiAnswer(""); setSearch(""); setSortKey("priority"); setSortDir("desc"); setHideCompleted(true); }
 
-  // Add project
+  // Add project (seed around selected starting phase)
   function addProject(){
     const valueNum=Number(String(qaValue).replace(/,/g,""));
     if(!qaName||!qaClient||Number.isNaN(valueNum)){ setToast("Fill Project Name, Client, and a numeric Value."); setTimeout(()=>setToast(""),2000); return; }
     const base=todayStart();
-    const milestones={};
-    // Seed relative to today using OFFSETS, but center around selected starting phase
     const center = qaPhase;
     const cascade = computeCascade(center, addDaysISO(base, OFFSETS[center]));
-    Object.assign(milestones, cascade);
-
     const newP={
       id: nextId(projects),
       name: qaName.trim(),
@@ -457,7 +449,7 @@ function App(){
       location: qaLocation.trim() || "Rock Hill, SC",
       value: valueNum,
       phase: qaPhase,
-      milestones,
+      milestones: { ...cascade },
       phaseSince: todayStart().toISOString().slice(0,10),
       tags: [],
       contactPerson: qaContact.trim(),
@@ -482,7 +474,6 @@ function App(){
   }
   function saveEdit(){
     if(!editId) return;
-    // Final enforcement of non-decreasing order (keeps your manual changes but removes impossible sequences)
     const sanitized = enforceNonDecreasing(editMilestones);
     setProjects(prev=>prev.map(p=> p.id===editId ? {
       ...p,
@@ -536,28 +527,26 @@ function App(){
 
   // Auto-cascade handlers inside Edit
   function onPhaseDateChange(ph, iso){
-    setTouched(prev => new Set(prev).add(ph));
+    setTouched(prev => { const s=new Set(prev); s.add(ph); return s; });
     setLastEditedPhase(ph);
     setEditMilestones(curr=>{
       let next = { ...curr, [ph]: iso };
       if (autoCascade && iso){
         const cascade = computeCascade(ph, iso);
-        // Only fill phases the user hasn't touched yet OR that are empty.
+        // NEW: overwrite all phases that the user hasn't touched *this session*,
+        // regardless of whether they already had a value.
         for (const p of PHASES){
           if (p===ph) continue;
-          const untouched = !touched.has(p);
-          const empty = !next[p];
-          if (untouched && empty){
+          if (!touched.has(p)){
             next[p] = cascade[p];
           }
         }
-        // Keep the sequence non-decreasing overall
         next = enforceNonDecreasing(next);
       }
       return next;
     });
   }
-  function autoFillFromCurrent(){
+  function autoFillFromCurrent(overwriteAll=false){
     if (!lastEditedPhase || !editMilestones[lastEditedPhase]) return;
     const ph = lastEditedPhase;
     const iso = editMilestones[ph];
@@ -566,8 +555,7 @@ function App(){
       const cascade = computeCascade(ph, iso);
       for (const p of PHASES){
         if (p===ph) continue;
-        // Fill anything not explicitly touched this session
-        if (!touched.has(p)){
+        if (overwriteAll || !touched.has(p)){
           next[p] = cascade[p];
         }
       }
@@ -632,6 +620,16 @@ function App(){
       </button>
     );
   }
+
+  // Live preview helper in Edit (for follow-up)
+  const editPreviewFollow = React.useMemo(()=>{
+    const p = {
+      cadenceDays: Number(editCadence||"14"),
+      lastContact: editLastContact||null,
+      completedAt: null
+    };
+    return followUpStatus(p);
+  }, [editCadence, editLastContact]);
 
   return (
     <div className="min-h-screen bg-[#0b1020] text-zinc-100">
@@ -816,12 +814,10 @@ function App(){
                                 </td>
 
                                 <td className="py-3 px-3 text-right space-x-2">
-                                  {/* simpler actions; no auto-advance */}
                                   <button onClick={()=>emailContact(p)} className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Email</button>
                                   <button onClick={()=>logContact(p)} className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Log</button>
-                                  <button onClick={()=>setEditId(p.id)||startEdit(p)} className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Edit</button>
+                                  <button onClick={()=>startEdit(p)} className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Edit</button>
                                   {!p.completedAt && <button onClick={()=>{
-                                      // one-click complete (stamps Installing done)
                                       const iso=todayStart().toISOString().slice(0,10);
                                       setProjects(prev=>prev.map(x=>x.id===p.id?{...x, done:{...(x.done||{}), Installing: iso}, completedAt: iso}:x));
                                     }} className="px-2.5 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-sm">Complete</button>}
@@ -839,9 +835,10 @@ function App(){
                                           <input type="checkbox" checked={autoCascade} onChange={()=>setAutoCascade(v=>!v)} />
                                           <span>Auto-cascade dates as I edit</span>
                                         </label>
-                                        <button onClick={autoFillFromCurrent} className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm" title="Use the most recently edited phase as the anchor">Auto-fill from this phase</button>
+                                        <button onClick={()=>autoFillFromCurrent(false)} className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm" title="Use the last edited phase to fill untouched phases">Auto-fill from this phase</button>
+                                        <button onClick={()=>autoFillFromCurrent(true)} className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm" title="Overwrite ALL phases from the anchor">Re-sequence all</button>
                                       </div>
-                                      <div className="text-xs text-zinc-400">{lastEditedPhase ? `Anchor: ${lastEditedPhase}` : "Set a date to establish an anchor"}</div>
+                                      <div className="text-xs text-zinc-400">{lastEditedPhase ? `Anchor: ${lastEditedPhase}` : "Set any phase date to establish an anchor"}</div>
                                     </div>
 
                                     <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -852,6 +849,9 @@ function App(){
                                         </select>
                                         <label className="text-xs text-zinc-400 mt-3 block">Phase Since</label>
                                         <input type="date" value={editPhaseSince} onChange={(e)=>setEditPhaseSince(e.target.value)} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
+                                        <div className="mt-4 text-xs text-zinc-400">
+                                          <div className={`${editPreviewFollow.class}`}>Preview: {editPreviewFollow.text}</div>
+                                        </div>
                                       </div>
 
                                       {PHASES.map(ph=>(
@@ -986,14 +986,14 @@ function App(){
                 <input value={qaCadence} onChange={(e)=>setQaCadence(e.target.value)} placeholder="Follow-up every (days)" inputMode="numeric" className="w-56 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm"/>
               </div>
               <button onClick={addProject} className="w-full bg-emerald-600 hover:bg-emerald-500 px-3 py-2 rounded-lg text-sm font-medium">Add Project</button>
-              <p className="text-xs text-zinc-400">Milestones are auto-filled around the selected phase; adjust any dates as needed.</p>
+              <p className="text-xs text-zinc-400">Milestones auto-fill around the selected phase; adjust any dates as needed.</p>
             </CardContent>
           </Card>
         </aside>
       </main>
 
       <footer className="max-w-7xl mx-auto px-4 pb-10 text-xs text-zinc-500">
-        Auto-cascade dates • Simple per-phase Done • Hide completed • Delete per row • ICS reminders • Risk tints • Sort • Inline value edit • AI chips • Aging & stalled • Follow-up tracking • Local persistence
+        Auto-cascade (fixed overwrite) • Simple per-phase Done • Hide completed • Delete per row • ICS reminders • Risk tints • Sort • Inline value edit • AI chips • Aging & stalled • Follow-up tracking • Local persistence
       </footer>
 
       {toast && <div className="fixed bottom-4 right-4 bg-zinc-900 border border-zinc-700 text-sm px-3 py-2 rounded-lg">{toast}</div>}
