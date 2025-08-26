@@ -1,36 +1,41 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8" />
+    <meta charset="utf-8" />
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1, user-scalable=no"
     />
     <title>Southwood Project Tracker</title>
 
-    <!-- Tailwind CDN (for styling) -->
+    <!-- Tailwind CSS for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
 
-    <!-- React + ReactDOM (UMD) -->
+    <!-- React 18 + ReactDOM (UMD builds) -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 
-    <!-- Babel Standalone so we can use JSX in the browser -->
+    <!-- Babel Standalone so the browser can compile JSX from App.js -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
     <style>
-      /* Small tweaks for dark theme scrollbars and focus */
       :root { color-scheme: dark; }
+      body { background: #0b1020; color: #e5e7eb; margin: 0; }
+      /* nicer scrollbars */
       ::-webkit-scrollbar { height: 10px; width: 10px; }
       ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 9999px; }
       ::-webkit-scrollbar-track { background: transparent; }
-      input, select, button { outline: none; }
     </style>
   </head>
-  <body class="bg-[#0b1020] text-zinc-100">
-    <div id="root"></div>
+  <body>
+    <noscript>
+      You need to enable JavaScript to run this app.
+    </noscript>
 
-    <!-- Your app code -->
+    <!-- React mounts here -->
+    <div id="root">Loading…</div>
+
+    <!-- Load your app (exact file name & path matter; keep "App.js" case) -->
     <script type="text/babel" data-presets="react" src="./App.js"></script>
   </body>
 </html>
