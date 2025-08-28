@@ -8,14 +8,14 @@
     />
     <title>Southwood Project Tracker</title>
 
-    <!-- Tailwind CSS for styling -->
+    <!-- Tailwind for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
 
-    <!-- React 18 + ReactDOM (UMD builds) -->
+    <!-- React 18 + ReactDOM UMD builds -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 
-    <!-- Babel Standalone so the browser can compile JSX from App.js -->
+    <!-- Babel so the browser can run JSX from App.js -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
     <style>
@@ -25,17 +25,42 @@
       ::-webkit-scrollbar { height: 10px; width: 10px; }
       ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 9999px; }
       ::-webkit-scrollbar-track { background: transparent; }
+
+      /* small error overlay so you see issues instead of a blank page */
+      #err {
+        display:none; position:fixed; inset:12px; z-index:99999;
+        background:rgba(24,24,27,.95); color:#fecaca; border:1px solid #7f1d1d;
+        border-radius:12px; padding:12px; font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        white-space:pre-wrap; overflow:auto;
+      }
+      #err.show { display:block; }
     </style>
   </head>
   <body>
-    <noscript>
-      You need to enable JavaScript to run this app.
-    </noscript>
+    <!-- Error overlay -->
+    <div id="err"></div>
+    <script>
+      (function(){
+        const el = document.getElementById('err');
+        function show(msg){ el.textContent = String(msg || 'Unknown error'); el.classList.add('show'); }
+        window.addEventListener('error', e => show('Error: ' + e.message));
+        window.addEventListener('unhandledrejection', e => show('Unhandled: ' + (e.reason && (e.reason.message || e.reason) )));
+      })();
+    </script>
 
     <!-- React mounts here -->
-    <div id="root">Loading…</div>
+    <div id="root" class="p-3 text-right text-xs text-zinc-400">Loading…</div>
 
-    <!-- Load your app (exact file name & path matter; keep "App.js" case) -->
+    <!-- Quick smoke test: proves Babel + JSX is working -->
+    <script type="text/babel" data-presets="react">
+      // If you see this in the console, JSX compiled fine:
+      console.log("[Southwood] JSX compiler ready");
+    </script>
+
+    <!-- Load your React app file (must match exact name/path; case matters on GitHub Pages) -->
     <script type="text/babel" data-presets="react" src="./App.js"></script>
+    <!-- If your file is named app.js instead, use:
+    <script type="text/babel" data-presets="react" src="./app.js"></script>
+    -->
   </body>
 </html>
